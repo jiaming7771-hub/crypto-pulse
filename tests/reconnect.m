@@ -29,6 +29,7 @@ typedef void (^Completion)(NSData *, NSURLResponse *, NSError *);
 @property BOOL invalidated;
 -(NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request completionHandler:(Completion)completion;
 -(void)invalidateAndCancel;
+-(void)finishTasksAndInvalidate;
 @end
 @implementation FakeSession
 -(instancetype)init { if((self=[super init])) self.tasks=[NSMutableArray new]; return self; }
@@ -36,6 +37,7 @@ typedef void (^Completion)(NSData *, NSURLResponse *, NSError *);
     FakeTask *task=[FakeTask new]; task.request=request; task.completion=completion; [self.tasks addObject:task]; return (id)task;
 }
 -(void)invalidateAndCancel { self.invalidated=YES; for(FakeTask *task in self.tasks) [task cancel]; }
+-(void)finishTasksAndInvalidate { self.invalidated=YES; }
 @end
 @interface TestController : Controller
 @property NSInteger connections;
@@ -62,7 +64,7 @@ static TestController *Fixture(void) {
     ChartState *pendle=[ChartState new]; pendle.symbol=@"PENDLEUSDT"; pendle.expanded=YES;
     c.charts=@[btc,eth,pendle]; return c;
 }
-static NSArray *Candles(void) { return @[@[@1000,@"10",@"12",@"9",@"11",@"1",@2000]]; }
+static NSArray *Candles(void) { double open=floor(Now()/900)*900*1000; return @[@[@(open),@"10",@"12",@"9",@"11",@"1",@(open+899999)]]; }
 static void Check(BOOL success, NSString *message) { if(!success) { NSLog(@"FAIL: %@",message); exit(1); } }
 int main(void) { @autoreleasepool {
     TestController *c=Fixture(); ChartState *btc=c.charts[0], *eth=c.charts[1];
@@ -228,5 +230,45 @@ int main(void) { @autoreleasepool {
     for(Controller *child in root.singleWindows.copy) [child closeWindow:nil];
     Check(!root.singleWindows.count && [root.symbols isEqual:Symbols()],@"closing all single windows leaves the main configuration intact");
     puts("PASS: independent single windows, duplicate coins, restored state, closure races and no three-window cap");
+
+    c=Fixture();
+    for(NSNumber *stamp in @[@(NAN),@(INFINITY),@(-1000),@((Now()+86400)*1000)])
+        Check((![c accept:@{@"s":@"BTCUSDT",@"c":@"100",@"P":@"1",@"E":stamp} live:YES]),@"invalid or future timestamps cannot poison the quote stream");
+    Check(([c accept:@{@"s":@"BTCUSDT",@"c":@"101",@"P":@"1",@"E":@(Now()*1000)} live:YES]),@"normal quote still accepted after rejected timestamps");
+    btc=c.charts.firstObject; btc.candles=Candles(); btc.chartFetched=Now()-20;
+    NSArray *previous=btc.candles; double fetched=btc.chartFetched;
+    [c fetchChart:btc]; [(FakeTask *)(id)btc.chartTask finish:@[@[@1000,@"10",@"12",@"9",@"11",@"1",@2000]] error:NO];
+    Check(btc.chartFetched==fetched && btc.candles==previous && [btc.chartError containsString:@"过期"],@"HTTP 200 cached candles cannot refresh freshness or overwrite newer candles");
+    [c fetchChart:btc]; [(FakeTask *)(id)btc.chartTask finish:Candles() error:NO];
+    Check(btc.chartFetched>fetched && !btc.chartError,@"fresh candles recover after a stale response");
+    Check(!ParseCandles(@[@[@1000,@"10",@"12",@"9",@"11",@"1",@(NAN)]]),@"candle closing timestamp must be finite");
+    Check(!ParseCandles(@[@[@1000,@"10",@"12",@"9",@"11",@"1",@500]]),@"candle cannot close before opening");
+    puts("PASS: invalid/future quote timestamps and cached-Kline false-freshness regression");
+
+    NSRect screen=NSMakeRect(0,0,1440,900), anchor=NSMakeRect(1110,580,310,305);
+    NSMutableArray *occupied=[NSMutableArray arrayWithObject:[NSValue valueWithRect:anchor]];
+    for(int i=0;i<3;i++) {
+        NSRect next=PlaceWindow(NSMakeSize(310,415),screen,occupied,anchor);
+        Check(NSContainsRect(screen,next),@"new window stays inside screen");
+        for(NSValue *value in occupied) Check(!NSIntersectsRect(next,value.rectValue),@"free space is used before covering existing windows");
+        [occupied addObject:[NSValue valueWithRect:next]];
+    }
+    NSRect crowded=PlaceWindow(NSMakeSize(310,415),NSMakeRect(-320,0,320,420),@[[NSValue valueWithRect:NSMakeRect(-320,0,320,420)]],anchor);
+    Check(NSContainsRect(NSMakeRect(-320,0,320,420),crowded),@"crowded screen fallback remains reachable, including negative screen coordinates");
+    puts("PASS: free-space window placement and crowded-screen fallback");
+
+    root=Fixture(); root.singleWindows=[NSMutableArray new]; root.pickerSession=[root newSession];
+    FakeSession *pickerSession=(id)root.pickerSession;
+    [root validateCoin:@"SOLUSDT" endpoint:0 attempt:0 generation:++root.pickerGeneration];
+    oldPoll=(id)root.pickerTask; [oldPoll finish:nil error:YES];
+    Check(pickerSession.tasks.count==2 && [pickerSession.tasks.lastObject.request.URL.host isEqual:@"api.binance.com"],@"picker network failure tries a fallback endpoint");
+    [pickerSession.tasks.lastObject finish:nil error:YES]; [pickerSession.tasks.lastObject finish:nil error:YES];
+    Check(!root.pickerTask && !root.pickerSession && pickerSession.tasks.count==3 && pickerSession.invalidated,@"picker failure is bounded and releases its session");
+    root.pickerSession=[root newSession];
+    [root validateCoin:@"SOLUSDT" endpoint:0 attempt:0 generation:++root.pickerGeneration];
+    oldPoll=(id)root.pickerTask; [root cancelPicker:nil];
+    [oldPoll finish:market(@"SOLUSDT",@"TRADING",@"0.01") error:NO];
+    Check(!root.singleWindows.count && !root.pickerTask,@"a late successful lookup after cancel cannot create a ghost window");
+    puts("PASS: picker fallback exhaustion, session cleanup and cancelled lookup race");
     return 0;
 } }

@@ -29,6 +29,32 @@ static NSTextField *PickerLabel(NSString *text, NSRect frame, CGFloat size) {
     NSTextField *label=[NSTextField wrappingLabelWithString:text]; label.frame=frame;
     label.font=[NSFont systemFontOfSize:size]; return label;
 }
+static NSRect FitWindow(NSRect frame, NSRect screen) {
+    frame.origin.x=MAX(NSMinX(screen),MIN(frame.origin.x,NSMaxX(screen)-frame.size.width));
+    frame.origin.y=MAX(NSMinY(screen),MIN(frame.origin.y,NSMaxY(screen)-frame.size.height));
+    return frame;
+}
+static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupied, NSRect anchor) {
+    NSMutableArray<NSValue *> *candidates=[NSMutableArray new];
+    for(NSValue *value in [occupied arrayByAddingObject:[NSValue valueWithRect:anchor]]) {
+        NSRect r=value.rectValue;
+        for(NSNumber *x in @[@(NSMinX(r)-size.width-12),@(NSMaxX(r)+12),@(NSMinX(r))])
+            for(NSNumber *y in @[@(NSMaxY(r)-size.height),@(NSMinY(r)-size.height-12),@(NSMaxY(r)+12)])
+                [candidates addObject:[NSValue valueWithRect:FitWindow(NSMakeRect(x.doubleValue,y.doubleValue,size.width,size.height),screen)]];
+    }
+    for(double x=NSMinX(screen);x<=NSMaxX(screen)-size.width+1;x+=size.width+12)
+        for(double y=NSMaxY(screen)-size.height;y>=NSMinY(screen)-1;y-=size.height+12)
+            [candidates addObject:[NSValue valueWithRect:NSMakeRect(x,y,size.width,size.height)]];
+    NSRect best=FitWindow(NSMakeRect(NSMinX(anchor),NSMaxY(anchor)-size.height,size.width,size.height),screen);
+    double bestScore=DBL_MAX;
+    for(NSValue *value in candidates) {
+        NSRect r=value.rectValue; double overlap=0;
+        for(NSValue *other in occupied) { NSRect intersection=NSIntersectionRect(r,NSInsetRect(other.rectValue,-6,-6)); overlap+=intersection.size.width*intersection.size.height; }
+        double score=overlap*1e6+fabs(NSMidX(r)-NSMidX(anchor))+fabs(NSMaxY(r)-NSMaxY(anchor));
+        if(score<bestScore) { bestScore=score; best=r; }
+    }
+    return best;
+}
 @implementation Controller (Windows)
 -(Controller *)newWindowController { return [Controller new]; }
 -(void)setupWindowCommands {
@@ -65,6 +91,7 @@ static NSTextField *PickerLabel(NSString *text, NSRect frame, CGFloat size) {
     self.closed=YES; self.generation++; self.pollGeneration++;
     [self.timer invalidate]; self.timer=nil;
     [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self];
+    [NSNotificationCenter.defaultCenter removeObserver:self];
     [self.socket cancelWithCloseCode:NSURLSessionWebSocketCloseCodeGoingAway reason:nil]; self.socket=nil;
     [self.pollTask cancel]; self.pollTask=nil; self.polling=NO;
     for(ChartState *chart in self.charts) { chart.chartGeneration++; [chart.chartTask cancel]; chart.chartTask=nil; }
@@ -96,21 +123,24 @@ static NSTextField *PickerLabel(NSString *text, NSRect frame, CGFloat size) {
         NSRect screen=(root.panel.screen?:NSScreen.mainScreen).visibleFrame;
         double scale=[record[@"scale"] isKindOfClass:NSNumber.class]?[record[@"scale"] doubleValue]:1;
         if(!isfinite(scale) || scale<=0) scale=1;
-        [child layoutPanel:scale];
-        NSRect frame=child.panel.frame;
+        NSRect previous=NSZeroRect;
         BOOL restored=NO;
         if([record[@"frame"] isKindOfClass:NSString.class]) {
             NSRect old=NSRectFromString(record[@"frame"]);
-            if(isfinite(old.origin.x) && isfinite(old.origin.y)) {
-                for(NSScreen *s in NSScreen.screens) if(NSIntersectsRect(old,s.visibleFrame)) { frame.origin=old.origin; screen=s.visibleFrame; restored=YES; break; }
+            if(isfinite(old.origin.x) && isfinite(old.origin.y) && isfinite(old.size.width) && isfinite(old.size.height) && old.size.width>0 && old.size.height>0) {
+                for(NSScreen *s in NSScreen.screens) if(NSIntersectsRect(old,s.visibleFrame)) { previous=old; screen=s.visibleFrame; restored=YES; break; }
             }
         }
+        // Size against the destination display, not the display used during construction.
+        [child layoutPanel:scale inVisibleFrame:screen];
+        NSRect frame=child.panel.frame;
+        if(restored) frame=FitWindow(NSMakeRect(previous.origin.x,previous.origin.y,frame.size.width,frame.size.height),screen);
         if(!restored) {
-            NSUInteger slot=root.singleWindows.count;
-            frame.origin=NSMakePoint(NSMaxX(root.panel.frame)-frame.size.width-28*slot,NSMaxY(root.panel.frame)-frame.size.height-28*slot);
+            NSMutableArray *occupied=[NSMutableArray new];
+            if(root.panel.visible) [occupied addObject:[NSValue valueWithRect:root.panel.frame]];
+            for(Controller *other in root.singleWindows) if(other!=child && other.panel.visible) [occupied addObject:[NSValue valueWithRect:other.panel.frame]];
+            frame=PlaceWindow(frame.size,screen,occupied,root.panel.frame);
         }
-        frame.origin.x=MAX(NSMinX(screen),MIN(frame.origin.x,NSMaxX(screen)-frame.size.width));
-        frame.origin.y=MAX(NSMinY(screen),MIN(frame.origin.y,NSMaxY(screen)-frame.size.height));
         [child.panel setFrame:frame display:YES]; [child show:nil];
     }
     [root saveSingleWindows]; return child;
@@ -151,7 +181,6 @@ static NSTextField *PickerLabel(NSString *text, NSRect frame, CGFloat size) {
         [v addSubview:PickerLabel(@"选择币种",NSMakeRect(24,210,350,22),16)];
         NSTextField *hint=PickerLabel(@"输入币种简称，例如 SOL、DOGE，或 SOL/USDT。",NSMakeRect(24,177,352,22),12); hint.textColor=NSColor.secondaryLabelColor; [v addSubview:hint];
         self.coinInput=[[NSComboBox alloc] initWithFrame:NSMakeRect(24,137,352,30)];
-        [self.coinInput addItemsWithObjectValues:@[@"BTC",@"ETH",@"PENDLE",@"SOL",@"DOGE",@"XRP",@"BNB",@"SHIB"]];
         self.coinInput.completes=YES; self.coinInput.stringValue=@"BTC";
         self.coinInput.placeholderString=@"币种简称"; [self.coinInput setAccessibilityLabel:@"币种简称，USDT现货"];
         [v addSubview:self.coinInput];
@@ -161,8 +190,16 @@ static NSTextField *PickerLabel(NSString *text, NSRect frame, CGFloat size) {
         self.openCoinButton=[NSButton buttonWithTitle:@"打开窗口" target:self action:@selector(confirmCoin:)]; self.openCoinButton.frame=NSMakeRect(278,22,98,32); self.openCoinButton.keyEquivalent=@"\r"; [v addSubview:self.openCoinButton];
         [self.picker center];
     }
+    if(!self.pickerTask) {
+        NSString *typed=self.coinInput.stringValue;
+        NSMutableOrderedSet *choices=[NSMutableOrderedSet new];
+        id recent=[NSUserDefaults.standardUserDefaults objectForKey:@"RecentSingleCoins"];
+        if([recent isKindOfClass:NSArray.class]) for(id name in recent) if(NormalizeSymbol(name)) [choices addObject:CoinCode(NormalizeSymbol(name))];
+        [choices addObjectsFromArray:@[@"BTC",@"ETH",@"PENDLE",@"SOL",@"DOGE",@"XRP",@"BNB",@"SHIB"]];
+        [self.coinInput removeAllItems]; [self.coinInput addItemsWithObjectValues:choices.array]; self.coinInput.stringValue=typed;
+    }
     [NSApp activateIgnoringOtherApps:YES]; [self.picker makeKeyAndOrderFront:nil];
-    if(!self.pickerTask) [self.picker makeFirstResponder:self.coinInput];
+    if(!self.pickerTask) { [self.picker makeFirstResponder:self.coinInput]; [self.coinInput selectText:nil]; }
 }
 -(void)cancelPicker:(id)sender {
     self.pickerGeneration++; [self.pickerTask cancel]; self.pickerTask=nil;
@@ -195,15 +232,21 @@ static NSTextField *PickerLabel(NSString *text, NSRect frame, CGFloat size) {
             id json=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;
             NSNumber *digits=!error && status==200?MarketDigits(json,symbol):nil;
             if(digits) {
+                NSMutableOrderedSet *recent=[NSMutableOrderedSet orderedSetWithObject:CoinCode(symbol)];
+                id saved=[NSUserDefaults.standardUserDefaults objectForKey:@"RecentSingleCoins"];
+                if([saved isKindOfClass:NSArray.class]) for(id name in saved) if(NormalizeSymbol(name)) [recent addObject:CoinCode(NormalizeSymbol(name))];
+                NSArray *names=recent.array;
+                [NSUserDefaults.standardUserDefaults setObject:[names subarrayWithRange:NSMakeRange(0,MIN(12,names.count))] forKey:@"RecentSingleCoins"];
                 [self cancelPicker:nil]; [self createSingleWindow:symbol digits:digits.integerValue record:nil]; return;
             }
             BOOL invalid=[json isKindOfClass:NSDictionary.class] && [json[@"code"] isKindOfClass:NSNumber.class] && [json[@"code"] integerValue]==-1121;
             BOOL limited=status==429 || status==418;
-            if(!invalid && !limited && status!=200 && attempt+1<APIHosts().count) {
+            BOOL validList=[json isKindOfClass:NSDictionary.class] && [json[@"symbols"] isKindOfClass:NSArray.class];
+            if(!invalid && !limited && (error || status!=200 || !validList) && attempt+1<APIHosts().count) {
                 [self validateCoin:symbol endpoint:(endpoint+1)%APIHosts().count attempt:attempt+1 generation:generation]; return;
             }
             if(limited) self.pickerRetryAt=Now()+MAX(30,[[(NSHTTPURLResponse *)response valueForHTTPHeaderField:@"Retry-After"] doubleValue]);
-            self.pickerMessage.stringValue=invalid || (!error && status==200)?@"未找到可交易的 USDT 现货币种，请检查简称。":(limited?@"查询暂时受限，请稍后再试。":@"暂时连不上行情服务，请稍后再试。你输入的币种已保留。");
+            self.pickerMessage.stringValue=invalid || (!error && status==200 && validList)?@"未找到可交易的 USDT 现货币种，请检查简称。":(limited?@"查询暂时受限，请稍后再试。":@"暂时连不上行情服务，请稍后再试。你输入的币种已保留。");
             self.pickerMessage.textColor=NSColor.systemRedColor;
             self.coinInput.enabled=YES; self.openCoinButton.enabled=YES; self.openCoinButton.title=@"打开窗口";
             [self.pickerSession finishTasksAndInvalidate]; self.pickerSession=nil;

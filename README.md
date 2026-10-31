@@ -42,6 +42,8 @@ open "Crypto Pulse Mini.app"
 
 多窗口与选币实现位于 `source/windows.inc.m`，由 `source/main.m` 引入。
 
+v1.9 重点验收及改进：拒绝异常报价时间戳，避免旧 K 线被误标为新数据；修复选币请求中途失败的备用地址切换；新窗口优先使用空位，按目标屏幕调整恢复尺寸。单币窗口标题显示周期，选币列表优先展示最近使用的币种。详见 [测试与产品验收记录](QA-2026-11-01.md)。
+
 ## 图标
 
 `assets/CryptoPulse-XuanqingGold.png` 保留选定的原图。当前使用 `assets/CryptoPulse-XuanqingBrightGold.png` 和对应 `.icns`，保留图案与底色、提亮金色；包含多种 Dock/Finder 显示尺寸。图片由内置 imagegen 生成和编辑。构建脚本会把图标打包进应用。
