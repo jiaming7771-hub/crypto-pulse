@@ -129,5 +129,61 @@ int main(void) { @autoreleasepool {
     Check([c rowY:2]==713 && [c baseHeight]==825,@"PENDLE follows both expanded charts without overlap");
     pendle.expanded=YES; Check([c baseHeight]==1085,@"all three charts contribute to window height");
     puts("PASS: PENDLE live/fallback prices, precision, Kline, three-symbol recovery and layout");
+
+    c=Fixture(); for(ChartState *chart in c.charts) chart.expanded=NO;
+    [c poll]; oldPoll=(id)c.pollTask; [oldPoll finish:nil error:YES];
+    Check(c.apiIndex==1 && c.networkError!=nil,@"failed endpoint selects another official API host");
+    [c poll]; newPoll=(id)c.pollTask;
+    Check([newPoll.request.URL.host isEqual:@"api.binance.com"],@"next request actually uses fallback host");
+    [newPoll finish:@{} error:NO]; Check(c.apiIndex==2,@"malformed response cannot be treated as a connection success");
+    old=(id)c.session; c.started=Now()-60; c.lastRecovery=Now()-31; c.lastWS=0;
+    [c tick:nil];
+    Check(old.invalidated && c.connections==1 && c.polling && c.routeIndex==1,@"fast failures with all charts collapsed renew session and try direct route");
+    Check(!c.charts[0].chartTask && !c.charts[1].chartTask && !c.charts[2].chartTask,@"recovery does not open collapsed charts");
+    NSUInteger selected=c.apiIndex;
+    [oldPoll finish:nil error:YES];
+    Check(c.apiIndex==selected && c.polling,@"late failed request cannot change newly selected route");
+    puts("PASS: collapsed-window outage, alternate hosts/routes, malformed data and late-failure isolation");
+
+    c=Fixture(); for(ChartState *chart in c.charts) chart.expanded=NO;
+    for(NSString *symbol in @[@"BTCUSDT",@"ETHUSDT"]) [c accept:@{@"s":symbol,@"c":@"100",@"P":@"1",@"E":@(Now()*1000)} live:YES];
+    c.lastWS=Now(); c.lastPoll=Now()-6; [c tick:nil];
+    Check(c.polling,@"healthy BTC and ETH stream cannot suppress a missing PENDLE fallback");
+    NSMutableArray *complete=[NSMutableArray new];
+    for(NSString *symbol in Symbols()) [complete addObject:@{@"symbol":symbol,@"lastPrice":@"100",@"priceChangePercent":@"1",@"closeTime":@(Now()*1000+1)}];
+    [(FakeTask *)(id)c.pollTask finish:complete error:NO];
+    Check([c quotesFresh] && !c.networkError,@"complete response restores all three coins");
+    c.lastPoll=Now()-6; c.lastWS=Now(); [c tick:nil];
+    Check(!c.polling && c.connections==0,@"healthy streams avoid needless fallback and reconnection");
+    puts("PASS: per-coin freshness and REST fallback without disrupting healthy streams");
+
+    c=Fixture();
+    NSHTTPURLResponse *limited=[[NSHTTPURLResponse alloc] initWithURL:[NSURL URLWithString:APIHosts()[0]] statusCode:429 HTTPVersion:@"HTTP/1.1" headerFields:@{@"Retry-After":@"60"}];
+    [c requestFailed:nil response:limited endpoint:0]; [c poll]; [c fetchChart:c.charts[0]];
+    Check(c.restRetryAt>Now()+59 && !c.polling && !c.charts[0].chartTask && c.apiIndex==0,@"rate limiting pauses REST instead of hammering alternate hosts");
+    c.restRetryAt=Now()-1; [c poll]; Check(c.polling,@"REST resumes when rate-limit cooldown ends");
+    limited=[[NSHTTPURLResponse alloc] initWithURL:[NSURL URLWithString:APIHosts()[0]] statusCode:418 HTTPVersion:@"HTTP/1.1" headerFields:@{@"Retry-After":@"3600"}];
+    [c requestFailed:nil response:limited endpoint:0];
+    Check(c.restRetryAt>Now()+3599,@"long server cooldown is not shortened by the client");
+    puts("PASS: server cooldown respected and polling resumes");
+
+    c=Fixture(); for(ChartState *chart in c.charts) chart.expanded=NO;
+    c.started=Now()-60; c.lastRecovery=Now()-5;
+    [c poll]; c.lastPoll=Now()-13; [c tick:nil];
+    Check(c.routeIndex==1,@"repeated hung-task resets cannot indefinitely postpone route switching");
+    c.lastPoll=Now()-13; [c tick:nil];
+    Check(c.routeIndex==1,@"route switching is bounded during repeated timeouts");
+    Controller *real=[Controller new]; NSURLSession *normal=[real newSession];
+    Check(normal.configuration.timeoutIntervalForResource==RequestDeadline,@"REST retains bounded resource timeout");
+    real.routeIndex=1; NSURLSession *direct=[real newSession];
+    Check(direct.configuration.connectionProxyDictionary.count==0 && direct.configuration.connectionProxyDictionary!=nil,@"direct fallback overrides proxy for this session only");
+    [normal invalidateAndCancel]; [direct invalidateAndCancel];
+    puts("PASS: bounded route switching and per-session proxy fallback");
+
+    c=Fixture(); for(ChartState *chart in c.charts) chart.expanded=NO;
+    c.lastWS=Now()-25; c.lastConnect=Now()-25;
+    [c tick:nil];
+    Check(c.streamIndex==1 && c.connections==1,@"silent stream switches endpoint even without an error callback");
+    puts("PASS: silent stream fallback");
     return 0;
 } }

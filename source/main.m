@@ -31,11 +31,15 @@
 @property NSStatusItem *status;
 @property NSMutableDictionary<NSString *, Quote *> *quotes;
 @property NSURLSession *session;
+@property NSURLSession *streamSession;
 @property NSURLSessionWebSocketTask *socket;
 @property NSURLSessionDataTask *pollTask;
 @property NSTimer *timer;
 @property double lastWS, lastPoll, lastConnect, started, retryAt, delay, lastRecovery;
 @property NSInteger generation, pollGeneration;
+@property NSUInteger apiIndex, streamIndex, routeIndex;
+@property double restRetryAt, lastRouteChange;
+@property NSString *networkError;
 @property BOOL polling;
 @property NSArray<ChartState *> *charts;
 -(void)fetchChart:(ChartState *)chart;
@@ -47,6 +51,8 @@
 -(void)connect;
 -(void)poll;
 -(NSURLSession *)newSession;
+-(BOOL)quotesFresh;
+-(void)requestFailed:(NSError *)error response:(NSURLResponse *)response endpoint:(NSUInteger)endpoint;
 -(void)reconnect:(id)sender;
 -(BOOL)accept:(NSDictionary *)item live:(BOOL)live;
 @end
@@ -55,6 +61,18 @@ static NSColor *Down(void) { return [NSColor colorWithRed:1 green:.43 blue:.49 a
 static double Now(void) { return NSDate.date.timeIntervalSince1970; }
 static const double RequestDeadline=12;
 static const double RecoveryInterval=30;
+static NSArray<NSString *> *APIHosts(void) { return @[@"https://data-api.binance.vision",@"https://api.binance.com",@"https://api1.binance.com"]; }
+static NSArray<NSString *> *StreamHosts(void) { return @[@"wss://data-stream.binance.vision",@"wss://stream.binance.com:443"]; }
+static NSString *NetworkMessage(NSError *error, NSURLResponse *response) {
+    if(error) {
+        if(error.code==NSURLErrorTimedOut) return @"连接超时 · 自动重试中";
+        if(error.code==NSURLErrorNotConnectedToInternet) return @"网络已断开 · 自动重试中";
+        return @"线路连接失败 · 自动切换中";
+    }
+    NSInteger status=[(NSHTTPURLResponse *)response statusCode];
+    if(status==429 || status==418) return @"请求受限 · 稍后自动重试";
+    return status==200?@"行情数据异常 · 自动重试中":@"行情服务异常 · 自动切换中";
+}
 static NSArray<NSString *> *Symbols(void) { return @[@"BTCUSDT",@"ETHUSDT",@"PENDLEUSDT"]; }
 static NSString *CoinCode(NSString *symbol) { return [symbol substringToIndex:symbol.length-4]; }
 static NSInteger PriceDigits(NSString *symbol) { return [symbol isEqualToString:@"PENDLEUSDT"]?4:2; }
@@ -218,6 +236,7 @@ static NSArray *ParseCandles(id rows) {
     for(NSInteger i=1;i<self.owner.charts.count;i++) NSRectFill(NSMakeRect(17,[self.owner rowY:i]-7,276,1));
     CGFloat footer=[self.owner baseHeight]-31;
     NSString *status=self.owner.quotes.count==0?(Now()-self.owner.started<15?@"连接行情中…":@"网络不可用 · 重试中"):(fresh?(live?@"Binance · 实时":@"Binance · 5秒刷新"):@"数据已过期 · 重连中");
+    if(!fresh && self.owner.networkError) status=self.owner.networkError;
     [(fresh?Up():NSColor.orangeColor) setFill]; [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(17,footer+5,5,5)] fill];
     Label(status,NSMakeRect(28,footer,160,17),10,NSColor.lightGrayColor,NO,NO);
     Label(@"USDT · 24h涨跌",NSMakeRect(190,footer,103,17),10,NSColor.lightGrayColor,NO,YES);
@@ -323,9 +342,10 @@ static NSArray *ParseCandles(id rows) {
 }
 -(void)collapse:(NSButton *)sender { if(self.charts[sender.tag].expanded) [self toggleChart:sender.tag]; }
 -(void)fetchChart:(ChartState *)chart {
-    if(!chart.expanded || chart.chartTask) return;
+    if(!chart.expanded || chart.chartTask || Now()<self.restRetryAt) return;
     chart.chartAttempt=Now(); NSInteger token=++chart.chartGeneration;
-    NSURLComponents *url=[NSURLComponents componentsWithString:@"https://data-api.binance.vision/api/v3/klines"];
+    NSUInteger endpoint=self.apiIndex;
+    NSURLComponents *url=[NSURLComponents componentsWithString:[APIHosts()[endpoint] stringByAppendingString:@"/api/v3/klines"]];
     url.queryItems=@[[NSURLQueryItem queryItemWithName:@"symbol" value:chart.symbol],[NSURLQueryItem queryItemWithName:@"interval" value:chart.interval],[NSURLQueryItem queryItemWithName:@"limit" value:@"60"]];
     NSURLRequest *request=[NSURLRequest requestWithURL:url.URL cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:8];
     chart.chartTask=[self.session dataTaskWithRequest:request completionHandler:^(NSData *data,NSURLResponse *response,NSError *error) {
@@ -335,7 +355,7 @@ static NSArray *ParseCandles(id rows) {
             NSArray *rows=nil;
             if(!error && [(NSHTTPURLResponse *)response statusCode]==200 && data) rows=ParseCandles([NSJSONSerialization JSONObjectWithData:data options:0 error:nil]);
             if(rows.count) { chart.candles=rows; chart.chartFetched=Now(); chart.chartError=nil; }
-            else chart.chartError=@"K线连接失败 · 自动重试中";
+            else { chart.chartError=NetworkMessage(error,response); [self requestFailed:error response:response endpoint:endpoint]; }
             [self.view setNeedsDisplay:YES];
         });
     }]; [chart.chartTask resume];
@@ -384,7 +404,23 @@ static NSArray *ParseCandles(id rows) {
     config.timeoutIntervalForRequest=8;
     config.timeoutIntervalForResource=RequestDeadline;
     config.waitsForConnectivity=NO;
+    // Keep the system proxy as the default; try a direct route only after an outage.
+    // This setting affects this app only, never the system network preferences.
+    if(self.routeIndex) config.connectionProxyDictionary=@{};
     return [NSURLSession sessionWithConfiguration:config];
+}
+-(BOOL)quotesFresh {
+    for(NSString *symbol in Symbols()) { Quote *q=self.quotes[symbol]; if(!q || Now()-q.timestamp>15) return NO; }
+    return YES;
+}
+-(void)requestFailed:(NSError *)error response:(NSURLResponse *)response endpoint:(NSUInteger)endpoint {
+    self.networkError=NetworkMessage(error,response);
+    NSHTTPURLResponse *http=(id)response;
+    if(http.statusCode==429 || http.statusCode==418) {
+        double wait=[[http valueForHTTPHeaderField:@"Retry-After"] doubleValue];
+        self.restRetryAt=MAX(self.restRetryAt,Now()+MAX(30,wait));
+    } else if(self.apiIndex==endpoint) self.apiIndex=(endpoint+1)%APIHosts().count;
+    NSLog(@"行情请求失败 host=%@ route=%@ status=%ld error=%ld",APIHosts()[endpoint],self.routeIndex?@"direct":@"system",(long)http.statusCode,(long)error.code);
 }
 -(void)reconnect:(id)sender {
     // Invalidate generations before cancelling: late completions must not clear new tasks.
@@ -396,6 +432,7 @@ static NSArray *ParseCandles(id rows) {
         chart.chartAttempt=0; chart.chartError=nil;
     }
     [self.session invalidateAndCancel]; self.session=[self newSession];
+    [self.streamSession invalidateAndCancel]; self.streamSession=nil;
     self.lastWS=0; self.retryAt=0; self.delay=2;
     [self connect]; [self poll];
     for(ChartState *chart in self.charts) if(chart.expanded) [self fetchChart:chart];
@@ -405,15 +442,31 @@ static NSArray *ParseCandles(id rows) {
 -(void)tick:(id)sender {
     [self.view setNeedsDisplay:YES];
     double now=Now(); BOOL recover=self.polling && now-self.lastPoll>=RequestDeadline;
+    BOOL fresh=[self quotesFresh];
+    double oldest=now, newest=0;
+    for(NSString *symbol in Symbols()) { double stamp=self.quotes[symbol].timestamp; oldest=MIN(oldest,stamp); newest=MAX(newest,stamp); }
+    // Quick failures have no pending task. They must still recover with every chart closed.
+    if(!fresh && now-MAX(oldest,self.lastRecovery)>=RecoveryInterval) recover=YES;
     for(ChartState *chart in self.charts) if(chart.expanded) {
         if(chart.chartTask && now-chart.chartAttempt>=RequestDeadline) recover=YES;
         // Rebuild a broken connection pool even when individual requests keep failing quickly.
         if(now-self.lastRecovery>=RecoveryInterval && now-MAX(chart.chartFetched,self.lastRecovery)>=RecoveryInterval) recover=YES;
     }
-    if(recover) { [self reconnect:nil]; return; }
+    if(recover) {
+        if(now-MAX(newest,MAX(self.started,self.lastRouteChange))>=RecoveryInterval) {
+            self.routeIndex=1-self.routeIndex;
+            self.apiIndex=0;
+            self.lastRouteChange=now;
+        }
+        [self reconnect:nil]; return;
+    }
     for(ChartState *chart in self.charts) if(chart.expanded && !chart.chartTask && now-chart.chartAttempt>=5) [self fetchChart:chart];
-    if(Now()-self.lastWS>5 && Now()-self.lastPoll>=5) [self poll];
-    if((!self.socket && Now()>=self.retryAt) || (self.socket && Now()-MAX(self.lastWS,self.lastConnect)>20)) [self connect];
+    // One active stream must not suppress fallback for a missing or stale coin.
+    if((!fresh || now-self.lastWS>5) && now-self.lastPoll>=5) [self poll];
+    if(self.socket && now-MAX(self.lastWS,self.lastConnect)>20) {
+        self.streamIndex=(self.streamIndex+1)%StreamHosts().count;
+        [self connect];
+    } else if(!self.socket && now>=self.retryAt) [self connect];
 }
 -(BOOL)accept:(NSDictionary *)item live:(BOOL)live {
     if(![item isKindOfClass:NSDictionary.class]) return NO;
@@ -431,35 +484,53 @@ static NSArray *ParseCandles(id rows) {
     self.lastConnect=Now();
     NSMutableArray *streams=[NSMutableArray new];
     for(NSString *symbol in Symbols()) [streams addObject:[symbol.lowercaseString stringByAppendingString:@"@ticker"]];
-    NSString *address=[@"wss://data-stream.binance.vision/stream?streams=" stringByAppendingString:[streams componentsJoinedByString:@"/"]];
-    self.socket=[self.session webSocketTaskWithURL:[NSURL URLWithString:address]];
+    NSString *address=[NSString stringWithFormat:@"%@/stream?streams=%@",StreamHosts()[self.streamIndex],[streams componentsJoinedByString:@"/"]];
+    if(!self.streamSession) {
+        NSURLSessionConfiguration *config=NSURLSessionConfiguration.ephemeralSessionConfiguration;
+        config.timeoutIntervalForRequest=30; config.timeoutIntervalForResource=24*60*60;
+        config.waitsForConnectivity=NO;
+        if(self.routeIndex) config.connectionProxyDictionary=@{};
+        self.streamSession=[NSURLSession sessionWithConfiguration:config];
+    }
+    self.socket=[self.streamSession webSocketTaskWithURL:[NSURL URLWithString:address]];
     [self.socket resume]; [self receive:self.socket generation:self.generation];
 }
 -(void)receive:(NSURLSessionWebSocketTask *)socket generation:(NSInteger)token {
     [socket receiveMessageWithCompletionHandler:^(NSURLSessionWebSocketMessage *m,NSError *error){
         dispatch_async(dispatch_get_main_queue(), ^{
             if(token!=self.generation) return;
-            if(error) { self.socket=nil; self.retryAt=Now()+self.delay; self.delay=MIN(60,self.delay*2); return; }
+            if(error) {
+                [socket cancelWithCloseCode:NSURLSessionWebSocketCloseCodeGoingAway reason:nil];
+                self.socket=nil; self.retryAt=Now()+MAX(2,self.delay); self.delay=MIN(30,MAX(2,self.delay)*2);
+                self.streamIndex=(self.streamIndex+1)%StreamHosts().count;
+                NSLog(@"实时流断开 error=%ld，切换备用地址",(long)error.code);
+                return;
+            }
             NSData *data=m.type==NSURLSessionWebSocketMessageTypeString?[m.string dataUsingEncoding:NSUTF8StringEncoding]:m.data;
             id root=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;
-            if([root isKindOfClass:NSDictionary.class] && [self accept:root[@"data"] live:YES]) { self.lastWS=Now(); self.delay=2; }
+            if([root isKindOfClass:NSDictionary.class] && [self accept:root[@"data"] live:YES]) { self.lastWS=Now(); self.delay=2; if([self quotesFresh]) self.networkError=nil; }
             [self receive:socket generation:token];
         });
     }];
 }
 -(void)poll {
-    if(self.polling) return; self.polling=YES; self.lastPoll=Now();
+    if(self.polling || Now()<self.restRetryAt) return; self.polling=YES; self.lastPoll=Now();
     NSInteger token=++self.pollGeneration;
-    NSURLComponents *url=[NSURLComponents componentsWithString:@"https://data-api.binance.vision/api/v3/ticker/24hr"];
+    NSUInteger endpoint=self.apiIndex;
+    NSURLComponents *url=[NSURLComponents componentsWithString:[APIHosts()[endpoint] stringByAppendingString:@"/api/v3/ticker/24hr"]];
     NSString *symbolsJSON=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:Symbols() options:0 error:nil] encoding:NSUTF8StringEncoding];
     url.queryItems=@[[NSURLQueryItem queryItemWithName:@"symbols" value:symbolsJSON]];
     NSURLRequest *request=[NSURLRequest requestWithURL:url.URL cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:8];
     self.pollTask=[self.session dataTaskWithRequest:request completionHandler:^(NSData *data,NSURLResponse *response,NSError *error){
         dispatch_async(dispatch_get_main_queue(), ^{
             if(token!=self.pollGeneration) return;
-            self.pollTask=nil; self.polling=NO; if(error || ((NSHTTPURLResponse *)response).statusCode!=200 || !data) return;
+            self.pollTask=nil; self.polling=NO;
+            if(error || ((NSHTTPURLResponse *)response).statusCode!=200 || !data) { [self requestFailed:error response:response endpoint:endpoint]; return; }
             id items=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            if([items isKindOfClass:NSArray.class]) for(id item in items) [self accept:item live:NO];
+            BOOL accepted=NO;
+            if([items isKindOfClass:NSArray.class]) for(id item in items) accepted=[self accept:item live:NO] || accepted;
+            if(accepted && [self quotesFresh]) self.networkError=nil;
+            else [self requestFailed:nil response:response endpoint:endpoint];
         });
     }]; [self.pollTask resume];
 }
