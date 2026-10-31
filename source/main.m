@@ -42,6 +42,23 @@
 @property NSString *networkError;
 @property BOOL polling;
 @property NSArray<ChartState *> *charts;
+@property NSArray<NSString *> *selectedSymbols;
+@property NSDictionary<NSString *, NSNumber *> *symbolDigits;
+@property (weak) Controller *rootController;
+@property NSMutableArray<Controller *> *singleWindows;
+@property NSString *windowID;
+@property BOOL closed, restoringWindows, didLaunch;
+@property NSPanel *picker;
+@property NSComboBox *coinInput;
+@property NSTextField *pickerMessage;
+@property NSButton *openCoinButton;
+@property NSURLSession *pickerSession;
+@property NSURLSessionDataTask *pickerTask;
+@property NSInteger pickerGeneration;
+@property double pickerRetryAt;
+-(NSArray<NSString *> *)symbols;
+-(NSInteger)digitsForSymbol:(NSString *)symbol;
+-(void)startWindow;
 -(void)fetchChart:(ChartState *)chart;
 -(void)layoutPanel:(double)scale;
 -(void)drawChart:(ChartState *)chart;
@@ -55,6 +72,21 @@
 -(void)requestFailed:(NSError *)error response:(NSURLResponse *)response endpoint:(NSUInteger)endpoint;
 -(void)reconnect:(id)sender;
 -(BOOL)accept:(NSDictionary *)item live:(BOOL)live;
+@end
+@interface Controller (Windows)
+-(void)setupWindowCommands;
+-(void)newCoinWindow:(id)sender;
+-(void)closeWindow:(id)sender;
+-(void)stop;
+-(void)saveSingleWindows;
+-(void)restoreSingleWindows;
+-(void)showAll:(id)sender;
+-(void)reconnectAll:(id)sender;
+-(void)cancelPicker:(id)sender;
+-(void)confirmCoin:(id)sender;
+-(void)validateCoin:(NSString *)symbol endpoint:(NSUInteger)endpoint attempt:(NSUInteger)attempt generation:(NSInteger)generation;
+-(Controller *)newWindowController;
+-(Controller *)createSingleWindow:(NSString *)symbol digits:(NSInteger)digits record:(NSDictionary *)record;
 @end
 static NSColor *Up(void) { return [NSColor colorWithRed:.32 green:.88 blue:.68 alpha:1]; }
 static NSColor *Down(void) { return [NSColor colorWithRed:1 green:.43 blue:.49 alpha:1]; }
@@ -203,11 +235,10 @@ static NSArray *ParseCandles(id rows) {
     NSBezierPath *path=[NSBezierPath bezierPathWithRoundedRect:b xRadius:16 yRadius:16];
     [[NSColor colorWithRed:.065 green:.085 blue:.12 alpha:1] setFill]; [path fill];
     [(self.hoveredEdges?Up():[NSColor colorWithWhite:1 alpha:.16]) setStroke]; [path stroke];
-    Label(@"CRYPTO PULSE",NSMakeRect(17,15,150,18),11,NSColor.whiteColor,YES,NO);
-    Label(@"置顶",NSMakeRect(155,15,35,18),10,Up(),NO,YES);
+    Label(self.owner.windowID?[NSString stringWithFormat:@"%@ · 行情",CoinCode(self.owner.symbols.firstObject)]:@"CRYPTO PULSE",NSMakeRect(17,15,125,18),11,NSColor.whiteColor,YES,NO);
     BOOL fresh=self.owner.quotes.count==self.owner.charts.count;
     BOOL live=YES;
-    NSArray *names=@[@"Bitcoin",@"Ethereum",@"Pendle"];
+    NSDictionary *names=@{@"BTCUSDT":@"Bitcoin",@"ETHUSDT":@"Ethereum",@"PENDLEUSDT":@"Pendle"};
     for (NSInteger i=0;i<self.owner.charts.count;i++) {
         ChartState *chart=self.owner.charts[i];
         NSString *s=CoinCode(chart.symbol); Quote *q=self.owner.quotes[chart.symbol];
@@ -218,12 +249,14 @@ static NSArray *ParseCandles(id rows) {
             [[NSColor colorWithWhite:1 alpha:.045] setFill];
             [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(9,y-6,292,62) xRadius:8 yRadius:8] fill];
         }
-        NSColor *coin=i==0?NSColor.orangeColor:(i==1?[NSColor colorWithRed:.65 green:.72 blue:1 alpha:1]:[NSColor colorWithRed:.58 green:.86 blue:.84 alpha:1]);
+        NSColor *coin=[chart.symbol isEqual:@"BTCUSDT"]?NSColor.orangeColor:([chart.symbol isEqual:@"ETHUSDT"]?[NSColor colorWithRed:.65 green:.72 blue:1 alpha:1]:[NSColor colorWithRed:.58 green:.86 blue:.84 alpha:1]);
         Label(s,NSMakeRect(17,y,75,25),s.length>3?14:19,coin,YES,NO);
-        Label([NSString stringWithFormat:@"%@ %@ K线",names[i],chart.expanded?@"⌄":@"›"],NSMakeRect(17,y+27,80,15),10,NSColor.lightGrayColor,NO,NO);
-        NSNumberFormatter *f=[NSNumberFormatter new]; f.locale=[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"]; f.numberStyle=NSNumberFormatterDecimalStyle; f.minimumFractionDigits=PriceDigits(chart.symbol); f.maximumFractionDigits=PriceDigits(chart.symbol);
+        Label([NSString stringWithFormat:@"%@ %@ K线",names[chart.symbol]?:s,chart.expanded?@"⌄":@"›"],NSMakeRect(17,y+27,95,15),10,NSColor.lightGrayColor,NO,NO);
+        NSNumberFormatter *f=[NSNumberFormatter new]; f.locale=[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"]; f.numberStyle=NSNumberFormatterDecimalStyle; f.minimumFractionDigits=[self.owner digitsForSymbol:chart.symbol]; f.maximumFractionDigits=f.minimumFractionDigits;
         NSString *price=q?[f stringFromNumber:@(q.price)]:@"— —";
-        Label(price,NSMakeRect(95,y-3,198,34),26,stale?NSColor.grayColor:NSColor.whiteColor,YES,YES);
+        CGFloat fontSize=26;
+        while(fontSize>13 && [price sizeWithAttributes:@{NSFontAttributeName:[NSFont monospacedDigitSystemFontOfSize:fontSize weight:NSFontWeightSemibold]}].width>198) fontSize--;
+        Label(price,NSMakeRect(95,y-3,198,34),fontSize,stale?NSColor.grayColor:NSColor.whiteColor,YES,YES);
         NSString *change=q?[NSString stringWithFormat:@"%@%.2f%%",q.change>=0?@"↑ +":@"↓ −",fabs(q.change)]:@"等待行情";
         Label(change,NSMakeRect(120,y+32,173,18),12,stale?NSColor.grayColor:(q.change>=0?Up():Down()),YES,YES);
         if(chart.expanded) {
@@ -245,18 +278,27 @@ static NSArray *ParseCandles(id rows) {
 @implementation Controller
 -(void)applicationDidFinishLaunching:(NSNotification *)n {
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    self.singleWindows=[NSMutableArray new]; self.restoringWindows=YES;
+    [self startWindow]; [self setupWindowCommands]; [self restoreSingleWindows];
+    self.restoringWindows=NO; [self saveSingleWindows]; self.didLaunch=YES;
+}
+-(NSArray<NSString *> *)symbols { return self.selectedSymbols?:Symbols(); }
+-(NSInteger)digitsForSymbol:(NSString *)symbol { return self.symbolDigits[symbol]?self.symbolDigits[symbol].integerValue:PriceDigits(symbol); }
+-(void)startWindow {
     NSMutableArray *charts=[NSMutableArray new];
-    for(NSString *symbol in Symbols()) { ChartState *chart=[ChartState new]; chart.symbol=symbol; [charts addObject:chart]; }
-    self.charts=charts;
+    for(NSString *symbol in self.symbols) { ChartState *chart=[ChartState new]; chart.symbol=symbol; [charts addObject:chart]; }
+    if(!self.charts) self.charts=charts;
     self.quotes=[NSMutableDictionary new]; self.session=[self newSession]; self.started=Now(); self.lastRecovery=self.started; self.delay=2;
     self.panel=[[NSPanel alloc] initWithContentRect:NSMakeRect(0,0,310,[self baseHeight]) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
     self.panel.delegate=self;
-    self.panel.title=@"Crypto Pulse Mini"; self.panel.level=NSScreenSaverWindowLevel;
+    self.panel.title=self.windowID?[NSString stringWithFormat:@"%@ · Crypto Pulse Mini",CoinCode(self.symbols.firstObject)]:@"Crypto Pulse Mini"; self.panel.level=NSScreenSaverWindowLevel;
+    self.panel.releasedWhenClosed=NO;
     self.panel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary|NSWindowCollectionBehaviorStationary;
     self.panel.acceptsMouseMovedEvents=YES; self.panel.floatingPanel=YES; self.panel.hidesOnDeactivate=NO; self.panel.movableByWindowBackground=YES;
     self.panel.opaque=NO; self.panel.backgroundColor=NSColor.clearColor; self.panel.hasShadow=YES;
     self.view=[[PanelView alloc] initWithFrame:NSMakeRect(0,0,310,[self baseHeight])]; self.view.owner=self; self.panel.contentView=self.view;
-    NSButton *close=[NSButton buttonWithTitle:@"×" target:self action:@selector(quit:)]; close.frame=NSMakeRect(278,9,24,24); close.bordered=NO; close.font=[NSFont systemFontOfSize:17]; close.contentTintColor=NSColor.lightGrayColor; close.toolTip=@"退出行情窗口"; [close setAccessibilityLabel:@"退出行情窗口"]; [self.view addSubview:close];
+    NSButton *close=[NSButton buttonWithTitle:@"×" target:self action:@selector(closeWindow:)]; close.frame=NSMakeRect(278,9,24,24); close.bordered=NO; close.font=[NSFont systemFontOfSize:17]; close.contentTintColor=NSColor.lightGrayColor; close.toolTip=self.windowID?@"关闭这个单币窗口":@"隐藏主窗口（其他窗口继续运行）"; [close setAccessibilityLabel:close.toolTip]; [self.view addSubview:close];
+    NSButton *newWindow=[self addButton:@"新建" rect:NSMakeRect(145,9,48,24) action:@selector(newCoinWindow:) tag:0 hint:@"新建单币窗口" chart:NO]; newWindow.contentTintColor=Up();
     [self addButton:@"−" rect:NSMakeRect(201,9,26,24) action:@selector(zoom:) tag:-1 hint:@"缩小窗口" chart:NO];
     [self addButton:@"＋" rect:NSMakeRect(235,9,26,24) action:@selector(zoom:) tag:1 hint:@"放大窗口" chart:NO];
     NSArray *names=@[@"15分钟",@"1小时",@"4小时",@"1天"];
@@ -267,19 +309,16 @@ static NSArray *ParseCandles(id rows) {
         [chart.buttons addObject:closeChart];
         for(NSInteger j=0;j<4;j++) [chart.buttons addObject:[self addButton:names[j] rect:NSZeroRect action:@selector(selectInterval:) tag:i*4+j hint:[NSString stringWithFormat:@"%@ %@",chart.symbol,names[j]] chart:NO]];
     }
-    [self.panel setFrameAutosaveName:@"CryptoPulseMiniPosition"];
-    if (![self.panel setFrameUsingName:@"CryptoPulseMiniPosition"]) [self reset:nil];
+    if(!self.windowID) [self.panel setFrameAutosaveName:@"CryptoPulseMiniPosition"];
+    if(self.windowID || ![self.panel setFrameUsingName:@"CryptoPulseMiniPosition"]) [self reset:nil];
     BOOL visible=NO; for(NSScreen *s in NSScreen.screens) if(NSIntersectsRect(s.visibleFrame,self.panel.frame)) visible=YES;
     if(!visible) [self reset:nil];
-    double scale=[NSUserDefaults.standardUserDefaults doubleForKey:@"MiniScale"];
+    double scale=self.windowID?1:[NSUserDefaults.standardUserDefaults doubleForKey:@"MiniScale"];
     [self layoutPanel:scale>0?scale:1];
     [self.panel orderFrontRegardless];
-    self.status=[NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength]; self.status.button.image=[NSImage imageWithSystemSymbolName:@"chart.line.uptrend.xyaxis" accessibilityDescription:@"Crypto Pulse 行情"];
-    NSMenu *menu=[NSMenu new];
-    for(NSArray *entry in @[@[@"显示行情窗口",@"show:"],@[@"重新连接行情",@"reconnect:"],@[@"移到屏幕右上角",@"reset:"],@[@"退出 Crypto Pulse",@"quit:"]]) { NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:entry[0] action:NSSelectorFromString(entry[1]) keyEquivalent:@""]; item.target=self; [menu addItem:item]; }
-    self.status.menu=menu;
     [NSWorkspace.sharedWorkspace.notificationCenter addObserver:self selector:@selector(wake:) name:NSWorkspaceDidWakeNotification object:nil];
     [self connect]; [self poll];
+    for(ChartState *chart in self.charts) if(chart.expanded) [self fetchChart:chart];
     self.timer=[NSTimer timerWithTimeInterval:1 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
     [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
 }
@@ -311,10 +350,12 @@ static NSArray *ParseCandles(id rows) {
         for(NSButton *b in chart.buttons) { b.hidden=!chart.expanded; b.contentTintColor=NSColor.lightGrayColor; }
         chart.buttons[1+[intervals indexOfObject:chart.interval]].contentTintColor=Up();
     }
-    [NSUserDefaults.standardUserDefaults setDouble:scale forKey:@"MiniScale"];
+    if(!self.windowID) [NSUserDefaults.standardUserDefaults setDouble:scale forKey:@"MiniScale"];
+    [self saveSingleWindows];
     [self.view setNeedsDisplay:YES];
 }
--(void)windowDidResize:(NSNotification *)n { [NSUserDefaults.standardUserDefaults setDouble:self.panel.frame.size.width/310 forKey:@"MiniScale"]; }
+-(void)windowDidResize:(NSNotification *)n { if(!self.windowID) [NSUserDefaults.standardUserDefaults setDouble:self.panel.frame.size.width/310 forKey:@"MiniScale"]; [self saveSingleWindows]; }
+-(void)windowDidMove:(NSNotification *)n { [self saveSingleWindows]; }
 -(void)zoom:(NSButton *)sender { [self layoutPanel:self.panel.frame.size.width/310+sender.tag*.1]; }
 -(double)baseHeight {
     double height=80+75*self.charts.count;
@@ -342,7 +383,7 @@ static NSArray *ParseCandles(id rows) {
 }
 -(void)collapse:(NSButton *)sender { if(self.charts[sender.tag].expanded) [self toggleChart:sender.tag]; }
 -(void)fetchChart:(ChartState *)chart {
-    if(!chart.expanded || chart.chartTask || Now()<self.restRetryAt) return;
+    if(self.closed || !chart.expanded || chart.chartTask || Now()<self.restRetryAt) return;
     chart.chartAttempt=Now(); NSInteger token=++chart.chartGeneration;
     NSUInteger endpoint=self.apiIndex;
     NSURLComponents *url=[NSURLComponents componentsWithString:[APIHosts()[endpoint] stringByAppendingString:@"/api/v3/klines"]];
@@ -372,7 +413,9 @@ static NSArray *ParseCandles(id rows) {
     for(int i=0;i<4;i++) {
         double price=hi-(hi-lo)*i/3.0, yy=y(price);
         [[NSColor colorWithWhite:1 alpha:.08] setFill]; NSRectFill(NSMakeRect(17,yy,225,.5));
-        Label([NSString stringWithFormat:@"%.*f",[chart.symbol isEqualToString:@"PENDLEUSDT"]?4:0,price],NSMakeRect(245,yy-6,49,14),9,NSColor.lightGrayColor,NO,YES);
+        NSInteger digits=[@[@"BTCUSDT",@"ETHUSDT"] containsObject:chart.symbol]?0:[self digitsForSymbol:chart.symbol];
+        NSString *axis=[NSString stringWithFormat:@"%.*f",(int)digits,price];
+        Label(axis,NSMakeRect(245,yy-6,49,14),axis.length>8?7:9,NSColor.lightGrayColor,NO,YES);
     }
     double step=225.0/chart.candles.count;
     BOOL stale=Now()-chart.chartFetched>15;
@@ -391,14 +434,19 @@ static NSArray *ParseCandles(id rows) {
     Label(message,NSMakeRect(17,465,235,16),9,stale?NSColor.orangeColor:NSColor.lightGrayColor,NO,NO);
     Label(@"北京时间",NSMakeRect(240,465,54,16),9,NSColor.lightGrayColor,NO,YES);
     NSArray *last=chart.candles.lastObject;
-    Label([NSString stringWithFormat:@"开 %.*f   收 %.*f",(int)PriceDigits(chart.symbol),[last[1] doubleValue],(int)PriceDigits(chart.symbol),[last[4] doubleValue]],NSMakeRect(17,282,280,14),9,NSColor.lightGrayColor,NO,NO);
+    Label([NSString stringWithFormat:@"开 %.*f   收 %.*f",(int)[self digitsForSymbol:chart.symbol],[last[1] doubleValue],(int)[self digitsForSymbol:chart.symbol],[last[4] doubleValue]],NSMakeRect(17,282,280,14),9,NSColor.lightGrayColor,NO,NO);
 }
 -(void)show:(id)sender { [self.panel orderFrontRegardless]; }
 -(BOOL)applicationShouldHandleReopen:(NSApplication *)app hasVisibleWindows:(BOOL)visible {
-    [self show:nil]; return YES;
+    if(self.didLaunch) [self newCoinWindow:nil]; else [self show:nil]; return NO;
 }
 -(void)reset:(id)sender { NSRect r=NSScreen.mainScreen.visibleFrame; [self.panel setFrameOrigin:NSMakePoint(NSMaxX(r)-334,NSMaxY(r)-254)]; [self show:nil]; }
 -(void)quit:(id)sender { [NSApp terminate:nil]; }
+-(void)applicationWillTerminate:(NSNotification *)notification {
+    [self saveSingleWindows]; [self cancelPicker:nil];
+    for(Controller *child in self.singleWindows.copy) [child stop];
+    [self stop];
+}
 -(NSURLSession *)newSession {
     NSURLSessionConfiguration *config=NSURLSessionConfiguration.ephemeralSessionConfiguration;
     config.timeoutIntervalForRequest=8;
@@ -410,7 +458,7 @@ static NSArray *ParseCandles(id rows) {
     return [NSURLSession sessionWithConfiguration:config];
 }
 -(BOOL)quotesFresh {
-    for(NSString *symbol in Symbols()) { Quote *q=self.quotes[symbol]; if(!q || Now()-q.timestamp>15) return NO; }
+    for(NSString *symbol in self.symbols) { Quote *q=self.quotes[symbol]; if(!q || Now()-q.timestamp>15) return NO; }
     return YES;
 }
 -(void)requestFailed:(NSError *)error response:(NSURLResponse *)response endpoint:(NSUInteger)endpoint {
@@ -423,6 +471,7 @@ static NSArray *ParseCandles(id rows) {
     NSLog(@"行情请求失败 host=%@ route=%@ status=%ld error=%ld",APIHosts()[endpoint],self.routeIndex?@"direct":@"system",(long)http.statusCode,(long)error.code);
 }
 -(void)reconnect:(id)sender {
+    if(self.closed) return;
     // Invalidate generations before cancelling: late completions must not clear new tasks.
     self.lastRecovery=Now(); self.generation++; self.pollGeneration++;
     [self.socket cancelWithCloseCode:NSURLSessionWebSocketCloseCodeGoingAway reason:nil]; self.socket=nil;
@@ -438,13 +487,14 @@ static NSArray *ParseCandles(id rows) {
     for(ChartState *chart in self.charts) if(chart.expanded) [self fetchChart:chart];
     [self.view setNeedsDisplay:YES];
 }
--(void)wake:(id)sender { [self reconnect:nil]; [self show:nil]; }
+-(void)wake:(id)sender { [self reconnect:nil]; }
 -(void)tick:(id)sender {
+    if(self.closed) return;
     [self.view setNeedsDisplay:YES];
     double now=Now(); BOOL recover=self.polling && now-self.lastPoll>=RequestDeadline;
     BOOL fresh=[self quotesFresh];
     double oldest=now, newest=0;
-    for(NSString *symbol in Symbols()) { double stamp=self.quotes[symbol].timestamp; oldest=MIN(oldest,stamp); newest=MAX(newest,stamp); }
+    for(NSString *symbol in self.symbols) { double stamp=self.quotes[symbol].timestamp; oldest=MIN(oldest,stamp); newest=MAX(newest,stamp); }
     // Quick failures have no pending task. They must still recover with every chart closed.
     if(!fresh && now-MAX(oldest,self.lastRecovery)>=RecoveryInterval) recover=YES;
     for(ChartState *chart in self.charts) if(chart.expanded) {
@@ -472,7 +522,7 @@ static NSArray *ParseCandles(id rows) {
     if(![item isKindOfClass:NSDictionary.class]) return NO;
     NSString *s=item[live?@"s":@"symbol"], *p=item[live?@"c":@"lastPrice"], *c=item[live?@"P":@"priceChangePercent"];
     NSNumber *stamp=item[live?@"E":@"closeTime"];
-    if(![Symbols() containsObject:s] || ![p isKindOfClass:NSString.class] || ![c isKindOfClass:NSString.class] || ![stamp isKindOfClass:NSNumber.class]) return NO;
+    if(![self.symbols containsObject:s] || ![p isKindOfClass:NSString.class] || ![c isKindOfClass:NSString.class] || ![stamp isKindOfClass:NSNumber.class]) return NO;
     double price,change; NSScanner *ps=[NSScanner scannerWithString:p], *cs=[NSScanner scannerWithString:c];
     if(![ps scanDouble:&price] || !ps.atEnd || ![cs scanDouble:&change] || !cs.atEnd || !isfinite(price) || price<=0 || !isfinite(change)) return NO;
     double time=stamp.doubleValue/1000; Quote *old=self.quotes[s]; if(old && old.timestamp>time) return NO;
@@ -480,10 +530,11 @@ static NSArray *ParseCandles(id rows) {
     [self.view setNeedsDisplay:YES]; return YES;
 }
 -(void)connect {
+    if(self.closed) return;
     self.generation++; [self.socket cancelWithCloseCode:NSURLSessionWebSocketCloseCodeGoingAway reason:nil];
     self.lastConnect=Now();
     NSMutableArray *streams=[NSMutableArray new];
-    for(NSString *symbol in Symbols()) [streams addObject:[symbol.lowercaseString stringByAppendingString:@"@ticker"]];
+    for(NSString *symbol in self.symbols) [streams addObject:[symbol.lowercaseString stringByAppendingString:@"@ticker"]];
     NSString *address=[NSString stringWithFormat:@"%@/stream?streams=%@",StreamHosts()[self.streamIndex],[streams componentsJoinedByString:@"/"]];
     if(!self.streamSession) {
         NSURLSessionConfiguration *config=NSURLSessionConfiguration.ephemeralSessionConfiguration;
@@ -514,11 +565,11 @@ static NSArray *ParseCandles(id rows) {
     }];
 }
 -(void)poll {
-    if(self.polling || Now()<self.restRetryAt) return; self.polling=YES; self.lastPoll=Now();
+    if(self.closed || self.polling || Now()<self.restRetryAt) return; self.polling=YES; self.lastPoll=Now();
     NSInteger token=++self.pollGeneration;
     NSUInteger endpoint=self.apiIndex;
     NSURLComponents *url=[NSURLComponents componentsWithString:[APIHosts()[endpoint] stringByAppendingString:@"/api/v3/ticker/24hr"]];
-    NSString *symbolsJSON=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:Symbols() options:0 error:nil] encoding:NSUTF8StringEncoding];
+    NSString *symbolsJSON=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:self.symbols options:0 error:nil] encoding:NSUTF8StringEncoding];
     url.queryItems=@[[NSURLQueryItem queryItemWithName:@"symbols" value:symbolsJSON]];
     NSURLRequest *request=[NSURLRequest requestWithURL:url.URL cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:8];
     self.pollTask=[self.session dataTaskWithRequest:request completionHandler:^(NSData *data,NSURLResponse *response,NSError *error){
@@ -535,6 +586,7 @@ static NSArray *ParseCandles(id rows) {
     }]; [self.pollTask resume];
 }
 @end
+#import "windows.inc.m"
 int main(int argc,const char *argv[]) { @autoreleasepool {
     if(argc>1 && strcmp(argv[1],"--self-test")==0) {
         Controller *c=[Controller new]; c.quotes=[NSMutableDictionary new];

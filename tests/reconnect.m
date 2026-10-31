@@ -44,6 +44,15 @@ typedef void (^Completion)(NSData *, NSURLResponse *, NSError *);
 -(NSURLSession *)newSession { return (id)[FakeSession new]; }
 -(void)connect { self.connections++; self.generation++; self.lastConnect=Now(); self.socket=(id)[FakeTask new]; }
 -(void)show:(id)sender {}
+-(Controller *)newWindowController { return [TestController new]; }
+-(void)saveSingleWindows {}
+-(void)layoutPanel:(double)scale {}
+-(void)startWindow {
+    self.quotes=[NSMutableDictionary new]; self.session=[self newSession];
+    self.started=Now(); self.lastRecovery=Now(); self.delay=2;
+    [self connect]; [self poll];
+    for(ChartState *chart in self.charts) if(chart.expanded) [self fetchChart:chart];
+}
 @end
 static TestController *Fixture(void) {
     TestController *c=[TestController new];
@@ -185,5 +194,39 @@ int main(void) { @autoreleasepool {
     [c tick:nil];
     Check(c.streamIndex==1 && c.connections==1,@"silent stream switches endpoint even without an error callback");
     puts("PASS: silent stream fallback");
+
+    Check([NormalizeSymbol(@" sol/usdt ") isEqual:@"SOLUSDT"] && [NormalizeSymbol(@"doge") isEqual:@"DOGEUSDT"],@"coin input accepts short names and pairs");
+    Check(!NormalizeSymbol(@"USDT") && !NormalizeSymbol(@"../../BTC") && !NormalizeSymbol(@"") && !NormalizeSymbol(@"BTC?x=1"),@"invalid coin input is rejected");
+    NSDictionary *(^market)(NSString *,NSString *,NSString *)=^NSDictionary *(NSString *symbol,NSString *status,NSString *tick) { return @{@"symbols":@[@{@"symbol":symbol,@"quoteAsset":@"USDT",@"status":status,@"isSpotTradingAllowed":@YES,@"filters":@[@{@"filterType":@"PRICE_FILTER",@"tickSize":tick}]}]}; };
+    Check([MarketDigits(market(@"SOLUSDT",@"TRADING",@"0.01000000"),@"SOLUSDT") isEqual:@2],@"SOL precision comes from tick size");
+    Check([MarketDigits(market(@"SHIBUSDT",@"TRADING",@"0.00000001"),@"SHIBUSDT") isEqual:@8],@"small-price tokens retain eight decimals");
+    Check(!MarketDigits(market(@"SOLUSDT",@"BREAK",@"0.01"),@"SOLUSDT") && !MarketDigits(@{},@"SOLUSDT"),@"paused or malformed markets cannot open");
+    Check([MarketDigits(market(@"PENDLEUSDT",@"TRADING",@"0.00100000"),@"PENDLEUSDT") isEqual:@4],@"PENDLE preserves existing four-digit display");
+    puts("PASS: coin input validation, tradable spot pairs and price precision");
+
+    TestController *root=Fixture(); root.singleWindows=[NSMutableArray new];
+    Controller *single=[root createSingleWindow:@"SOLUSDT" digits:2 record:nil];
+    Controller *duplicate=[root createSingleWindow:@"SOLUSDT" digits:2 record:@{@"interval":@"4h",@"expanded":@NO}];
+    Controller *tiny=[root createSingleWindow:@"SHIBUSDT" digits:8 record:nil];
+    Check(root.singleWindows.count==3 && [root.symbols isEqual:Symbols()],@"main keeps three original coins beside three independent windows");
+    Check(![single.windowID isEqual:duplicate.windowID] && single.charts.firstObject.expanded && !duplicate.charts.firstObject.expanded,@"duplicate coins have independent chart state and identity");
+    Check([duplicate.charts.firstObject.interval isEqual:@"4h"] && [tiny digitsForSymbol:@"SHIBUSDT"]==8,@"restored interval and precision are preserved");
+    poll=(id)single.pollTask; components=[NSURLComponents componentsWithURL:poll.request.URL resolvingAgainstBaseURL:NO];
+    requested=[NSJSONSerialization JSONObjectWithData:[components.queryItems.firstObject.value dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+    Check([requested isEqual:@[@"SOLUSDT"]],@"single window subscribes only to its selected coin");
+    Check(([single accept:@{@"s":@"SOLUSDT",@"c":@"150",@"P":@"1",@"E":@(Now()*1000)} live:YES]),@"single window accepts selected market");
+    Check(([single quotesFresh] && ![single accept:@{@"s":@"BTCUSDT",@"c":@"100",@"P":@"1",@"E":@(Now()*1000)} live:YES]),@"single-coin freshness and isolation");
+    FakeSession *otherSession=(id)duplicate.session; oldBTC=(id)single.charts.firstObject.chartTask; oldPoll=(id)single.pollTask;
+    NSInteger mainConnections=root.connections;
+    [single closeWindow:nil];
+    Check(root.singleWindows.count==2 && single.closed && !single.polling && oldBTC.cancelled && oldPoll.cancelled,@"closing one window cancels only its requests");
+    Check(!otherSession.invalidated && root.connections==mainConnections && duplicate.polling,@"other windows keep their sessions and data");
+    [oldBTC finish:Candles() error:NO]; [oldPoll finish:nil error:YES]; [single tick:nil]; [single reconnect:nil];
+    Check(!single.session && !single.charts.firstObject.candles.count && !single.polling,@"late callbacks cannot resurrect a closed window");
+    for(int i=0;i<5;i++) [root createSingleWindow:@"BTCUSDT" digits:2 record:nil];
+    Check(root.singleWindows.count==7,@"window count is not capped at three");
+    for(Controller *child in root.singleWindows.copy) [child closeWindow:nil];
+    Check(!root.singleWindows.count && [root.symbols isEqual:Symbols()],@"closing all single windows leaves the main configuration intact");
+    puts("PASS: independent single windows, duplicate coins, restored state, closure races and no three-window cap");
     return 0;
 } }
