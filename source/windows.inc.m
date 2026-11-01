@@ -62,7 +62,7 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
     self.status.button.image=[NSImage imageWithSystemSymbolName:@"chart.line.uptrend.xyaxis" accessibilityDescription:@"Crypto Pulse 行情"];
     NSMenu *(^makeMenu)(void)=^NSMenu *{
         NSMenu *menu=[NSMenu new];
-        for(NSArray *entry in @[@[@"新建单币窗口…",@"newCoinWindow:",@"n"],@[@"显示主窗口",@"show:",@""],@[@"显示所有行情窗口",@"showAll:",@""],@[@"重新连接所有行情",@"reconnectAll:",@""],@[@"主窗口移到右上角",@"reset:",@""],@[@"退出 Crypto Pulse",@"quit:",@"q"]]) {
+        for(NSArray *entry in @[@[@"新建单币窗口…",@"newCoinWindow:",@"n"],@[@"一键排列所有窗口",@"arrangeWindows:",@""],@[@"显示主窗口",@"show:",@""],@[@"显示所有行情窗口",@"showAll:",@""],@[@"重新连接所有行情",@"reconnectAll:",@""],@[@"主窗口移到右上角",@"reset:",@""],@[@"退出 Crypto Pulse",@"quit:",@"q"]]) {
             NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:entry[0] action:NSSelectorFromString(entry[1]) keyEquivalent:entry[2]]; item.target=self; [menu addItem:item];
         }
         return menu;
@@ -74,7 +74,7 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
 }
 -(NSMenu *)applicationDockMenu:(NSApplication *)app {
     NSMenu *menu=[NSMenu new];
-    for(NSArray *entry in @[@[@"新建单币窗口…",@"newCoinWindow:"],@[@"显示主窗口",@"show:"],@[@"显示所有行情窗口",@"showAll:"]]) {
+    for(NSArray *entry in @[@[@"新建单币窗口…",@"newCoinWindow:"],@[@"一键排列所有窗口",@"arrangeWindows:"],@[@"显示主窗口",@"show:"],@[@"显示所有行情窗口",@"showAll:"]]) {
         NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:entry[0] action:NSSelectorFromString(entry[1]) keyEquivalent:@""]; item.target=self; [menu addItem:item];
     }
     return menu;
@@ -101,6 +101,7 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
 -(void)closeWindow:(id)sender {
     if(!self.windowID) { [self.panel orderOut:nil]; return; }
     Controller *root=self.rootController;
+    if(root.switchTarget==self) [root cancelPicker:nil];
     [self stop]; self.panel.delegate=nil; [self.panel close];
     [root.singleWindows removeObjectIdenticalTo:self]; [root saveSingleWindows];
 }
@@ -113,6 +114,7 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
     Controller *child=[root newWindowController]; child.rootController=root;
     child.windowID=NSUUID.UUID.UUIDString;
     child.selectedSymbols=@[symbol]; child.symbolDigits=@{symbol:@(MAX(0,MIN(12,digits)))};
+    [child restoreAppearance:record];
     ChartState *chart=[ChartState new]; chart.symbol=symbol; chart.expanded=YES;
     if([@[@"15m",@"1h",@"4h",@"1d"] containsObject:record[@"interval"]]) chart.interval=record[@"interval"];
     if([record[@"expanded"] isKindOfClass:NSNumber.class]) chart.expanded=[record[@"expanded"] boolValue];
@@ -152,9 +154,11 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
     for(Controller *child in root.singleWindows) {
         if(child.closed || !child.panel || !child.charts.count) continue;
         ChartState *chart=child.charts.firstObject;
-        [records addObject:@{@"symbol":chart.symbol,@"digits":@([child digitsForSymbol:chart.symbol]),@"interval":chart.interval,@"expanded":@(chart.expanded),@"frame":NSStringFromRect(child.panel.frame),@"scale":@(child.panel.frame.size.width/310)}];
+        NSMutableDictionary *record=[@{@"symbol":chart.symbol,@"digits":@([child digitsForSymbol:chart.symbol]),@"interval":chart.interval,@"expanded":@(chart.expanded),@"frame":NSStringFromRect(child.panel.frame),@"scale":@(child.panel.frame.size.width/310)} mutableCopy];
+        [record addEntriesFromDictionary:[child appearanceRecord]]; [records addObject:record];
     }
     [NSUserDefaults.standardUserDefaults setObject:records forKey:@"SingleCoinWindows"];
+    [NSUserDefaults.standardUserDefaults setObject:[root appearanceRecord] forKey:@"MainWindowAppearance"];
 }
 -(void)restoreSingleWindows {
     id records=[NSUserDefaults.standardUserDefaults objectForKey:@"SingleCoinWindows"];
@@ -171,6 +175,11 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
 }
 -(void)newCoinWindow:(id)sender {
     if(self.rootController) { [self.rootController newCoinWindow:sender]; return; }
+    if(self.pickerTask) { [self.picker makeKeyAndOrderFront:nil]; return; }
+    [self presentCoinPickerForWindow:nil];
+}
+-(void)presentCoinPickerForWindow:(Controller *)target {
+    [self cancelPicker:nil]; self.switchTarget=target; self.replacingCoin=target!=nil;
     if(!self.picker) {
         self.picker=[[NSPanel alloc] initWithContentRect:NSMakeRect(0,0,400,250) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
         self.picker.title=@"新建单币窗口"; self.picker.delegate=self; self.picker.releasedWhenClosed=NO;
@@ -190,6 +199,10 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
         self.openCoinButton=[NSButton buttonWithTitle:@"打开窗口" target:self action:@selector(confirmCoin:)]; self.openCoinButton.frame=NSMakeRect(278,22,98,32); self.openCoinButton.keyEquivalent=@"\r"; [v addSubview:self.openCoinButton];
         [self.picker center];
     }
+    self.picker.title=target?@"切换当前窗口币种":@"新建单币窗口";
+    self.openCoinButton.title=target?@"确认切换":@"打开窗口";
+    self.pickerMessage.stringValue=target?@"切换后保留这个窗口的位置、大小、周期和显示设置。":@"每次打开一个独立置顶窗口，可重复选择同一币种。";
+    if(target) self.coinInput.stringValue=CoinCode(target.symbols.firstObject);
     if(!self.pickerTask) {
         NSString *typed=self.coinInput.stringValue;
         NSMutableOrderedSet *choices=[NSMutableOrderedSet new];
@@ -209,6 +222,7 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
     self.pickerMessage.stringValue=@"每次打开一个独立置顶窗口，可重复选择同一币种。";
     self.pickerMessage.textColor=NSColor.secondaryLabelColor;
     [self.picker orderOut:nil];
+    self.switchTarget=nil; self.replacingCoin=NO;
 }
 -(void)confirmCoin:(id)sender {
     if(self.pickerTask) return;
@@ -232,12 +246,16 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
             id json=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;
             NSNumber *digits=!error && status==200?MarketDigits(json,symbol):nil;
             if(digits) {
+                Controller *target=self.switchTarget; BOOL replace=self.replacingCoin;
+                if(replace && (!target || target.closed)) { [self cancelPicker:nil]; return; }
                 NSMutableOrderedSet *recent=[NSMutableOrderedSet orderedSetWithObject:CoinCode(symbol)];
                 id saved=[NSUserDefaults.standardUserDefaults objectForKey:@"RecentSingleCoins"];
                 if([saved isKindOfClass:NSArray.class]) for(id name in saved) if(NormalizeSymbol(name)) [recent addObject:CoinCode(NormalizeSymbol(name))];
                 NSArray *names=recent.array;
                 [NSUserDefaults.standardUserDefaults setObject:[names subarrayWithRange:NSMakeRange(0,MIN(12,names.count))] forKey:@"RecentSingleCoins"];
-                [self cancelPicker:nil]; [self createSingleWindow:symbol digits:digits.integerValue record:nil]; return;
+                [self cancelPicker:nil];
+                if(replace) [target replaceSymbol:symbol digits:digits.integerValue]; else [self createSingleWindow:symbol digits:digits.integerValue record:nil];
+                return;
             }
             BOOL invalid=[json isKindOfClass:NSDictionary.class] && [json[@"code"] isKindOfClass:NSNumber.class] && [json[@"code"] integerValue]==-1121;
             BOOL limited=status==429 || status==418;
@@ -248,7 +266,7 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
             if(limited) self.pickerRetryAt=Now()+MAX(30,[[(NSHTTPURLResponse *)response valueForHTTPHeaderField:@"Retry-After"] doubleValue]);
             self.pickerMessage.stringValue=invalid || (!error && status==200 && validList)?@"未找到可交易的 USDT 现货币种，请检查简称。":(limited?@"查询暂时受限，请稍后再试。":@"暂时连不上行情服务，请稍后再试。你输入的币种已保留。");
             self.pickerMessage.textColor=NSColor.systemRedColor;
-            self.coinInput.enabled=YES; self.openCoinButton.enabled=YES; self.openCoinButton.title=@"打开窗口";
+            self.coinInput.enabled=YES; self.openCoinButton.enabled=YES; self.openCoinButton.title=self.replacingCoin?@"确认切换":@"打开窗口";
             [self.pickerSession finishTasksAndInvalidate]; self.pickerSession=nil;
             [self.picker makeFirstResponder:self.coinInput];
         });

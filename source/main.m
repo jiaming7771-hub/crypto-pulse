@@ -15,6 +15,8 @@
 @property double chartFetched, chartAttempt;
 @property NSMutableArray<NSButton *> *buttons;
 @property NSButton *rowButton;
+@property BOOL hovered;
+@property NSPoint hoverFraction;
 @end
 @implementation ChartState
 -(instancetype)init { if((self=[super init])) { _interval=@"15m"; _candles=@[]; _buttons=[NSMutableArray new]; } return self; }
@@ -24,6 +26,7 @@
 @property (weak) Controller *owner;
 @property NSTrackingArea *resizeTracking;
 @property NSUInteger hoveredEdges;
+-(BOOL)updateHoverAt:(NSPoint)point;
 @end
 @interface Controller : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @property NSPanel *panel;
@@ -56,6 +59,9 @@
 @property NSURLSessionDataTask *pickerTask;
 @property NSInteger pickerGeneration;
 @property double pickerRetryAt;
+@property (weak) Controller *switchTarget;
+@property BOOL replacingCoin, pinned, snapEnabled;
+@property double opacity;
 -(NSArray<NSString *> *)symbols;
 -(NSInteger)digitsForSymbol:(NSString *)symbol;
 -(void)startWindow;
@@ -64,6 +70,7 @@
 -(void)layoutPanel:(double)scale inVisibleFrame:(NSRect)screen;
 -(void)screenConfigurationChanged:(NSNotification *)notification;
 -(void)drawChart:(ChartState *)chart;
+-(NSRect)plotRectAtIndex:(NSInteger)index;
 -(double)baseHeight;
 -(double)rowY:(NSInteger)index;
 
@@ -89,6 +96,21 @@
 -(void)validateCoin:(NSString *)symbol endpoint:(NSUInteger)endpoint attempt:(NSUInteger)attempt generation:(NSInteger)generation;
 -(Controller *)newWindowController;
 -(Controller *)createSingleWindow:(NSString *)symbol digits:(NSInteger)digits record:(NSDictionary *)record;
+-(void)presentCoinPickerForWindow:(Controller *)target;
+@end
+@interface Controller (WindowActions)
+-(void)showWindowOptions:(id)sender;
+-(NSMenu *)windowOptions;
+-(void)switchCoin:(id)sender;
+-(void)replaceSymbol:(NSString *)symbol digits:(NSInteger)digits;
+-(void)arrangeWindows:(id)sender;
+-(void)snapToEdges;
+-(void)togglePinned:(id)sender;
+-(void)toggleSnap:(id)sender;
+-(void)setOpacityFromMenu:(NSMenuItem *)sender;
+-(void)applyWindowAppearance;
+-(void)restoreAppearance:(NSDictionary *)record;
+-(NSDictionary *)appearanceRecord;
 @end
 static NSColor *Up(void) { return [NSColor colorWithRed:.32 green:.88 blue:.68 alpha:1]; }
 static NSColor *Down(void) { return [NSColor colorWithRed:1 green:.43 blue:.49 alpha:1]; }
@@ -134,6 +156,13 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
     double open=[rows.lastObject[0] doubleValue]/1000, close=[rows.lastObject[6] doubleValue]/1000;
     return duration>0 && open<=now+15 && open>=now-duration-15 && close>=now-15 && close<=now+duration+15;
 }
+static void ChartRange(NSArray *rows, double *low, double *high) {
+    double lo=DBL_MAX,hi=-DBL_MAX;
+    for(NSArray *r in rows) { hi=MAX(hi,[r[2] doubleValue]); lo=MIN(lo,[r[3] doubleValue]); }
+    double pad=MAX((hi-lo)*.08,hi*.00001); *low=lo-pad; *high=hi+pad;
+}
+static NSUInteger HoverIndex(NSUInteger count, double fraction) { return count?MIN(count-1,(NSUInteger)floor(MAX(0,MIN(1,fraction))*count)):0; }
+static double HoverPrice(double low, double high, double fraction) { return high-(high-low)*MAX(0,MIN(1,fraction)); }
 @implementation PanelView
 -(BOOL)isFlipped { return YES; }
 // Keep the visible resize target eight screen points wide at every zoom level.
@@ -190,12 +219,24 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
     NSPoint point=[self convertPoint:[self.window mouseLocationOutsideOfEventStream] fromView:nil];
     NSUInteger edges=[self resizeEdgesAt:point];
     if(edges!=self.hoveredEdges) { self.hoveredEdges=edges; [self setNeedsDisplay:YES]; }
-    [[self cursorForEdges:edges] set];
+    BOOL chartHover=[self updateHoverAt:point];
+    [(edges?[self cursorForEdges:edges]:(chartHover?NSCursor.crosshairCursor:NSCursor.arrowCursor)) set];
+}
+-(BOOL)updateHoverAt:(NSPoint)point {
+    BOOL any=NO,changed=NO;
+    for(NSUInteger i=0;i<self.owner.charts.count;i++) {
+        ChartState *chart=self.owner.charts[i]; NSRect plot=[self.owner plotRectAtIndex:i];
+        BOOL hover=chart.expanded && chart.candles.count && NSPointInRect(point,plot);
+        changed=changed || hover!=chart.hovered; chart.hovered=hover;
+        if(hover) { chart.hoverFraction=NSMakePoint((point.x-plot.origin.x)/plot.size.width,(point.y-plot.origin.y)/plot.size.height); any=YES; changed=YES; }
+    }
+    if(changed) [self setNeedsDisplay:YES]; return any;
 }
 -(void)cursorUpdate:(NSEvent *)event { [self updateResizeCursor]; }
 -(void)mouseMoved:(NSEvent *)event { [self updateResizeCursor]; }
 -(void)mouseEntered:(NSEvent *)event { [self updateResizeCursor]; }
--(void)mouseExited:(NSEvent *)event { self.hoveredEdges=0; [self setNeedsDisplay:YES]; [NSCursor.arrowCursor set]; }
+-(void)mouseExited:(NSEvent *)event { self.hoveredEdges=0; [self updateHoverAt:NSMakePoint(-1,-1)]; [self setNeedsDisplay:YES]; [NSCursor.arrowCursor set]; }
+-(void)rightMouseDown:(NSEvent *)event { [NSMenu popUpContextMenu:[self.owner windowOptions] withEvent:event forView:self]; }
 -(void)resetCursorRects {
     [super resetCursorRects];
     CGFloat w=self.bounds.size.width,h=self.bounds.size.height;
@@ -212,7 +253,7 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
 }
 -(void)mouseDown:(NSEvent *)event {
     NSUInteger edges=[self resizeEdgesAt:[self convertPoint:event.locationInWindow fromView:nil]];
-    if(!edges) { [self.window performWindowDragWithEvent:event]; return; }
+    if(!edges) { [self.window performWindowDragWithEvent:event]; [self.owner snapToEdges]; return; }
     NSRect initial=self.window.frame;
     NSPoint start=[self.window convertPointToScreen:event.locationInWindow];
     NSCursor *cursor=[self cursorForEdges:edges]; [cursor push];
@@ -231,7 +272,7 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
         frame.origin.y=edges&4?NSMaxY(initial)-frame.size.height:(edges&1?initial.origin.y:NSMidY(initial)-frame.size.height/2);
         [self.window setFrame:frame display:YES]; [cursor set];
     }
-    [NSCursor pop]; [self.window invalidateCursorRectsForView:self]; [self updateResizeCursor];
+    [NSCursor pop]; [self.owner snapToEdges]; [self.window invalidateCursorRectsForView:self]; [self updateResizeCursor];
 }
 
 -(void)setFrameSize:(NSSize)size {
@@ -245,7 +286,7 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
     NSBezierPath *path=[NSBezierPath bezierPathWithRoundedRect:b xRadius:16 yRadius:16];
     [[NSColor colorWithRed:.065 green:.085 blue:.12 alpha:1] setFill]; [path fill];
     [(self.hoveredEdges?Up():[NSColor colorWithWhite:1 alpha:.16]) setStroke]; [path stroke];
-    Label(self.owner.windowID?[NSString stringWithFormat:@"%@ · %@",CoinCode(self.owner.symbols.firstObject),IntervalLabel(self.owner.charts.firstObject.interval)]:@"CRYPTO PULSE",NSMakeRect(17,15,125,18),11,NSColor.whiteColor,YES,NO);
+    Label(self.owner.windowID?[NSString stringWithFormat:@"%@ · %@",CoinCode(self.owner.symbols.firstObject),IntervalLabel(self.owner.charts.firstObject.interval)]:@"CRYPTO PULSE",NSMakeRect(17,15,112,18),11,NSColor.whiteColor,YES,NO);
     BOOL fresh=self.owner.quotes.count==self.owner.charts.count;
     BOOL live=YES;
     NSDictionary *names=@{@"BTCUSDT":@"Bitcoin",@"ETHUSDT":@"Ethereum",@"PENDLEUSDT":@"Pendle"};
@@ -286,6 +327,7 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
 }
 @end
 @implementation Controller
+-(instancetype)init { if((self=[super init])) { _pinned=YES; _snapEnabled=YES; _opacity=1; } return self; }
 -(void)applicationDidFinishLaunching:(NSNotification *)n {
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     self.singleWindows=[NSMutableArray new]; self.restoringWindows=YES;
@@ -295,6 +337,7 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
 -(NSArray<NSString *> *)symbols { return self.selectedSymbols?:Symbols(); }
 -(NSInteger)digitsForSymbol:(NSString *)symbol { return self.symbolDigits[symbol]?self.symbolDigits[symbol].integerValue:PriceDigits(symbol); }
 -(void)startWindow {
+    if(!self.windowID) [self restoreAppearance:[NSUserDefaults.standardUserDefaults dictionaryForKey:@"MainWindowAppearance"]];
     NSMutableArray *charts=[NSMutableArray new];
     for(NSString *symbol in self.symbols) { ChartState *chart=[ChartState new]; chart.symbol=symbol; [charts addObject:chart]; }
     if(!self.charts) self.charts=charts;
@@ -306,9 +349,11 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
     self.panel.collectionBehavior=NSWindowCollectionBehaviorCanJoinAllSpaces|NSWindowCollectionBehaviorFullScreenAuxiliary|NSWindowCollectionBehaviorStationary;
     self.panel.acceptsMouseMovedEvents=YES; self.panel.floatingPanel=YES; self.panel.hidesOnDeactivate=NO; self.panel.movableByWindowBackground=YES;
     self.panel.opaque=NO; self.panel.backgroundColor=NSColor.clearColor; self.panel.hasShadow=YES;
+    [self applyWindowAppearance];
     self.view=[[PanelView alloc] initWithFrame:NSMakeRect(0,0,310,[self baseHeight])]; self.view.owner=self; self.panel.contentView=self.view;
     NSButton *close=[NSButton buttonWithTitle:@"×" target:self action:@selector(closeWindow:)]; close.frame=NSMakeRect(278,9,24,24); close.bordered=NO; close.font=[NSFont systemFontOfSize:17]; close.contentTintColor=NSColor.lightGrayColor; close.toolTip=self.windowID?@"关闭这个单币窗口":@"隐藏主窗口（其他窗口继续运行）"; [close setAccessibilityLabel:close.toolTip]; [self.view addSubview:close];
-    NSButton *newWindow=[self addButton:@"新建" rect:NSMakeRect(145,9,48,24) action:@selector(newCoinWindow:) tag:0 hint:@"新建单币窗口" chart:NO]; newWindow.contentTintColor=Up();
+    NSButton *newWindow=[self addButton:@"新建" rect:NSMakeRect(133,9,37,24) action:@selector(newCoinWindow:) tag:0 hint:@"新建单币窗口" chart:NO]; newWindow.contentTintColor=Up();
+    [self addButton:@"⋯" rect:NSMakeRect(172,9,27,24) action:@selector(showWindowOptions:) tag:0 hint:@"窗口选项：切币、排列、置顶、透明度" chart:NO];
     [self addButton:@"−" rect:NSMakeRect(201,9,26,24) action:@selector(zoom:) tag:-1 hint:@"缩小窗口" chart:NO];
     [self addButton:@"＋" rect:NSMakeRect(235,9,26,24) action:@selector(zoom:) tag:1 hint:@"放大窗口" chart:NO];
     NSArray *names=@[@"15分钟",@"1小时",@"4小时",@"1天"];
@@ -357,11 +402,13 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
     NSArray *intervals=@[@"15m",@"1h",@"4h",@"1d"];
     for(NSInteger i=0;i<self.charts.count;i++) {
         ChartState *chart=self.charts[i]; double row=[self rowY:i], start=row+64;
+        chart.hovered=NO;
         chart.rowButton.frame=NSMakeRect(10,row,288,64);
         NSString *hint=[NSString stringWithFormat:@"%@ %@ K线",chart.expanded?@"收起":@"展开",CoinCode(chart.symbol)];
         chart.rowButton.toolTip=hint; [chart.rowButton setAccessibilityLabel:hint];
         chart.buttons[0].frame=NSMakeRect(250,start,45,24);
-        for(NSInteger j=0;j<4;j++) chart.buttons[j+1].frame=NSMakeRect(15+j*71,start+30,66,25);
+        chart.buttons[0].toolTip=[NSString stringWithFormat:@"收起 %@ K线",chart.symbol]; [chart.buttons[0] setAccessibilityLabel:chart.buttons[0].toolTip];
+        for(NSInteger j=0;j<4;j++) { chart.buttons[j+1].frame=NSMakeRect(15+j*71,start+30,66,25); chart.buttons[j+1].toolTip=[NSString stringWithFormat:@"%@ %@",chart.symbol,IntervalLabel(intervals[j])]; [chart.buttons[j+1] setAccessibilityLabel:chart.buttons[j+1].toolTip]; }
         for(NSButton *b in chart.buttons) { b.hidden=!chart.expanded; b.contentTintColor=NSColor.lightGrayColor; }
         chart.buttons[1+[intervals indexOfObject:chart.interval]].contentTintColor=Up();
     }
@@ -388,6 +435,7 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
     for(NSInteger i=0;i<index;i++) if(self.charts[i].expanded) y+=260;
     return y;
 }
+-(NSRect)plotRectAtIndex:(NSInteger)index { return NSMakeRect(17,[self rowY:index]+139,225,137); }
 -(void)toggleChart:(NSInteger)index {
     ChartState *chart=self.charts[index]; chart.expanded=!chart.expanded;
     chart.chartGeneration++; [chart.chartTask cancel]; chart.chartTask=nil;
@@ -427,9 +475,7 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
     if(!chart.candles.count) {
         Label(chart.chartError?:@"正在加载K线…",NSMakeRect(27,350,260,25),12,NSColor.lightGrayColor,NO,NO); return;
     }
-    double lo=DBL_MAX,hi=-DBL_MAX;
-    for(NSArray *r in chart.candles) { hi=MAX(hi,[r[2] doubleValue]); lo=MIN(lo,[r[3] doubleValue]); }
-    double pad=MAX((hi-lo)*.08,hi*.00001); hi+=pad;lo-=pad;
+    double lo,hi; ChartRange(chart.candles,&lo,&hi);
     double (^y)(double)=^double(double price) { return 299+(hi-price)/(hi-lo)*137; };
     for(int i=0;i<4;i++) {
         double price=hi-(hi-lo)*i/3.0, yy=y(price);
@@ -454,8 +500,30 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
     NSString *message=stale?@"K线已过期 · 重试中":@"60根 · 5秒更新 · 末根未收盘";
     Label(message,NSMakeRect(17,465,235,16),9,stale?NSColor.orangeColor:NSColor.lightGrayColor,NO,NO);
     Label(@"北京时间",NSMakeRect(240,465,54,16),9,NSColor.lightGrayColor,NO,YES);
-    NSArray *last=chart.candles.lastObject;
+    NSArray *last=chart.hovered?chart.candles[HoverIndex(chart.candles.count,chart.hoverFraction.x)]:chart.candles.lastObject;
     Label([NSString stringWithFormat:@"开 %.*f   收 %.*f",(int)[self digitsForSymbol:chart.symbol],[last[1] doubleValue],(int)[self digitsForSymbol:chart.symbol],[last[4] doubleValue]],NSMakeRect(17,282,280,14),9,NSColor.lightGrayColor,NO,NO);
+    if(chart.hovered) {
+        double x=17+(HoverIndex(chart.candles.count,chart.hoverFraction.x)+.5)*step;
+        double yy=299+chart.hoverFraction.y*137;
+        NSColor *ink=[NSColor colorWithRed:.93 green:.81 blue:.50 alpha:1];
+        [ink setStroke]; NSBezierPath *cross=[NSBezierPath bezierPath]; CGFloat dash[]={3,3}; [cross setLineDash:dash count:2 phase:0]; cross.lineWidth=.75;
+        [cross moveToPoint:NSMakePoint(17,yy)]; [cross lineToPoint:NSMakePoint(242,yy)];
+        [cross moveToPoint:NSMakePoint(x,299)]; [cross lineToPoint:NSMakePoint(x,436)]; [cross stroke];
+        NSString *price=[NSString stringWithFormat:@"%.*f",(int)[self digitsForSymbol:chart.symbol],HoverPrice(lo,hi,chart.hoverFraction.y)];
+        double width=MAX(51,[price sizeWithAttributes:@{NSFontAttributeName:[NSFont monospacedDigitSystemFontOfSize:9 weight:NSFontWeightSemibold]}].width+8);
+        [ink setFill]; [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(294-width,yy-9,width,18) xRadius:3 yRadius:3] fill];
+        Label(price,NSMakeRect(297-width,yy-6,width-6,14),9,[NSColor colorWithWhite:.08 alpha:1],YES,YES);
+        f.dateFormat=@"MM/dd HH:mm";
+        NSString *time=[f stringFromDate:[NSDate dateWithTimeIntervalSince1970:[last[0] doubleValue]/1000]];
+        double left=MAX(17,MIN(x-45,152));
+        [[NSColor colorWithWhite:.22 alpha:1] setFill]; NSRectFill(NSMakeRect(left,438,90,18));
+        Label(time,NSMakeRect(left+4,440,82,15),9,NSColor.whiteColor,NO,NO);
+        double tipX=chart.hoverFraction.x>.5?22:65, tipY=chart.hoverFraction.y<.5?395:304;
+        [[NSColor colorWithWhite:.12 alpha:.96] setFill]; [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(tipX,tipY,160,36) xRadius:4 yRadius:4] fill];
+        NSInteger digits=[self digitsForSymbol:chart.symbol];
+        Label([NSString stringWithFormat:@"开 %.*f  高 %.*f",(int)digits,[last[1] doubleValue],(int)digits,[last[2] doubleValue]],NSMakeRect(tipX+5,tipY+4,150,14),8,NSColor.whiteColor,NO,NO);
+        Label([NSString stringWithFormat:@"低 %.*f  收 %.*f",(int)digits,[last[3] doubleValue],(int)digits,[last[4] doubleValue]],NSMakeRect(tipX+5,tipY+19,150,14),8,NSColor.whiteColor,NO,NO);
+    }
 }
 -(void)show:(id)sender { [self.panel orderFrontRegardless]; }
 -(BOOL)applicationShouldHandleReopen:(NSApplication *)app hasVisibleWindows:(BOOL)visible {
@@ -610,6 +678,7 @@ static BOOL CandlesCurrent(NSArray *rows, NSString *interval, double now) {
 }
 @end
 #import "windows.inc.m"
+#import "window-actions.inc.m"
 int main(int argc,const char *argv[]) { @autoreleasepool {
     if(argc>1 && strcmp(argv[1],"--self-test")==0) {
         Controller *c=[Controller new]; c.quotes=[NSMutableDictionary new];

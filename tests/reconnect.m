@@ -270,5 +270,25 @@ int main(void) { @autoreleasepool {
     [oldPoll finish:market(@"SOLUSDT",@"TRADING",@"0.01") error:NO];
     Check(!root.singleWindows.count && !root.pickerTask,@"a late successful lookup after cancel cannot create a ghost window");
     puts("PASS: picker fallback exhaustion, session cleanup and cancelled lookup race");
+    root=Fixture(); root.singleWindows=[NSMutableArray new];
+    single=[root createSingleWindow:@"SOLUSDT" digits:2 record:@{@"interval":@"4h",@"pinned":@NO,@"opacity":@.7,@"snap":@NO}];
+    oldBTC=(id)single.charts.firstObject.chartTask; oldPoll=(id)single.pollTask;
+    NSString *identity=single.windowID;
+    [single replaceSymbol:@"DOGEUSDT" digits:5];
+    Check([single.symbols isEqual:@[@"DOGEUSDT"]] && [single.windowID isEqual:identity] && root.singleWindows.count==1,@"switch changes the same window, never adds another window");
+    Check([single.charts.firstObject.interval isEqual:@"4h"] && !single.pinned && fabs(single.opacity-.7)<.001 && !single.snapEnabled,@"switch preserves timeframe and appearance");
+    [oldBTC finish:Candles() error:NO]; [oldPoll finish:@[@{@"symbol":@"SOLUSDT",@"lastPrice":@"100",@"priceChangePercent":@"1",@"closeTime":@(Now()*1000)}] error:NO];
+    Check(single.quotes.count==0 && single.charts.firstObject.candles.count==0 && single.pollTask && single.charts.firstObject.chartTask,@"late responses from previous coin cannot contaminate the switched window");
+    [single closeWindow:nil];
+    NSRect edge=SnapFrame(NSMakeRect(-1275,7,310,415),NSMakeRect(-1280,0,1280,800),14);
+    Check(edge.origin.x==-1280 && edge.origin.y==0,@"snap uses physical points and supports negative monitor coordinates");
+    NSRect middle=NSMakeRect(100,100,310,415); Check(NSEqualRects(middle,SnapFrame(middle,screen,14)),@"snap leaves windows away from edges untouched");
+    NSArray *cells=TileCells(@[@305,@415,@415,@1085],@[@1,@1,@1,@1],screen);
+    for(NSUInteger i=0;i<cells.count;i++) { Check(NSContainsRect(screen,[cells[i] rectValue]),@"tile cell stays on screen"); for(NSUInteger j=i+1;j<cells.count;j++) Check(!NSIntersectsRect([cells[i] rectValue],[cells[j] rectValue]),@"arrange cells never overlap"); }
+    Check(HoverIndex(60,0)==0 && HoverIndex(60,.5)==30 && HoverIndex(60,1)==59 && HoverIndex(0,1)==0,@"crosshair candle selection at chart boundaries");
+    Check(HoverPrice(10,20,0)==20 && HoverPrice(10,20,.5)==15 && HoverPrice(10,20,1)==10,@"crosshair follows pointer price, not candle closing price");
+    double low,high; ChartRange(Candles(),&low,&high); Check(low<9 && high>12 && isfinite(low) && isfinite(high),@"crosshair uses same padded range as the candles");
+    c=Fixture(); Check(NSEqualRects([c plotRectAtIndex:2],NSMakeRect(17,[c rowY:2]+139,225,137)),@"expanded charts map hover to each row's own plot");
+    puts("PASS: same-window coin switch, stale callback isolation, appearance, snap, tiling and crosshair mapping");
     return 0;
 } }
