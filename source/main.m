@@ -123,6 +123,8 @@
 @property NSPanel *panel;
 @property NSTextField *statusLabel, *detailLabel;
 @property NSButton *searchButton, *cancelButton, *strictButton;
+@property NSSegmentedControl *periodControl;
+@property NSString *interval;
 @property NSProgressIndicator *progress;
 @property NSTimer *deadlineTimer;
 @property NSTableView *table;
@@ -145,6 +147,7 @@
 -(void)pump:(NSInteger)token;
 -(void)finish;
 -(void)displayResults:(id)sender;
+-(void)selectPeriod:(id)sender;
 -(void)fail:(NSString *)message;
 -(void)openCoin:(NSButton *)sender;
 @end

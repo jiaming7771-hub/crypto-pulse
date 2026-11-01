@@ -1,11 +1,12 @@
-// BTC co-movement: a fresh global top-100 universe and an identical closed-bar window.
+// BTC co-movement: a fresh global top-200 universe and an identical closed-bar window.
 static NSString *MarketURL(NSString *category) {
-    NSString *base=@"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=false";
+    NSString *base=@"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=200&page=1&sparkline=false";
     return category?[base stringByAppendingFormat:@"&category=%@",category]:base;
 }
 static NSArray *ScreenMarkets(id json, double now) {
-    if(![json isKindOfClass:NSArray.class] || [json count]!=100) return nil;
+    if(![json isKindOfClass:NSArray.class] || [json count]!=200) return nil;
     NSMutableSet *ranks=[NSMutableSet new],*ids=[NSMutableSet new];
+    NSMutableArray *validated=[NSMutableArray new]; NSUInteger fresh=0; BOOL leaderFresh=NO;
     NSISO8601DateFormatter *dates=[NSISO8601DateFormatter new]; dates.formatOptions=NSISO8601DateFormatWithInternetDateTime|NSISO8601DateFormatWithFractionalSeconds;
     for(id coin in json) {
         if(![coin isKindOfClass:NSDictionary.class]) return nil;
@@ -13,10 +14,13 @@ static NSArray *ScreenMarkets(id json, double now) {
         if(![coin[@"market_cap_rank"] isKindOfClass:NSNumber.class] || ![coin[@"market_cap"] isKindOfClass:NSNumber.class]) return nil;
         double rank=[coin[@"market_cap_rank"] doubleValue],cap=[coin[@"market_cap"] doubleValue];
         NSDate *date=[dates dateFromString:coin[@"last_updated"]];
-        if(!date || now-date.timeIntervalSince1970>3600 || date.timeIntervalSince1970>now+60 || !isfinite(cap) || cap<=0 || rank<1 || rank>100 || floor(rank)!=rank) return nil;
+        if(!date || date.timeIntervalSince1970>now+60 || !isfinite(cap) || cap<=0 || rank<1 || rank>200 || floor(rank)!=rank) return nil;
         [ranks addObject:coin[@"market_cap_rank"]]; [ids addObject:coin[@"id"]];
+        BOOL stale=now-date.timeIntervalSince1970>3600;
+        if(!stale) { fresh++; if(rank==1) leaderFresh=YES; }
+        NSMutableDictionary *record=[coin mutableCopy]; record[@"staleMarket"]=@(stale); [validated addObject:record];
     }
-    return ranks.count==100 && ids.count==100?json:nil;
+    return ranks.count==200 && ids.count==200 && leaderFresh && fresh>=180?validated:nil;
 }
 static NSSet *CategoryIDs(id json) {
     if(![json isKindOfClass:NSArray.class] || ![json count]) return nil;
@@ -39,26 +43,29 @@ static NSArray *ScreenCandidates(NSArray *markets, NSSet *excluded, id exchange,
         NSString *code=[coin[@"symbol"] uppercaseString];
         if([coin[@"id"] isEqual:@"bitcoin"] || [code isEqual:@"BTC"] || [excluded containsObject:coin[@"id"]]) { (*removed)++; continue; }
         // Ambiguous tickers are skipped rather than assigning a different asset's price series.
-        if(!spot[code] || [counts[code] unsignedIntegerValue]!=1) { (*unsupported)++; continue; }
+        if([coin[@"staleMarket"] boolValue] || !spot[code] || [counts[code] unsignedIntegerValue]!=1) { (*unsupported)++; continue; }
         NSMutableDictionary *candidate=[coin mutableCopy]; candidate[@"pair"]=[code stringByAppendingString:@"USDT"]; candidate[@"digits"]=spot[code]; [out addObject:candidate];
     }
     return out;
 }
-static NSArray *AlignedReturns(id json, double cutoff) {
-    NSArray *rows=ParseCandles(json); if(rows.count!=97) return nil;
+static NSUInteger ScreenSeconds(NSString *interval) { return [@{@"15m":@900,@"1h":@3600}[interval] unsignedIntegerValue]; }
+static NSUInteger ScreenSamples(NSString *interval) { NSUInteger seconds=ScreenSeconds(interval); return seconds?86400/seconds:0; }
+static NSArray *AlignedReturns(id json, double cutoff, NSString *interval) {
+    NSUInteger seconds=ScreenSeconds(interval), count=ScreenSamples(interval)+1;
+    NSArray *rows=ParseCandles(json); if(!seconds || rows.count!=count) return nil;
     NSMutableArray *returns=[NSMutableArray new]; double previous=0;
     for(NSUInteger i=0;i<rows.count;i++) {
         NSArray *row=rows[i]; double open=[row[0] doubleValue]/1000,close=[row[6] doubleValue]/1000,price=[row[4] doubleValue];
-        if(fabs(open-(cutoff-(97-i)*900))>.001 || fabs(close-(open+899.999))>.01 || close>=cutoff) return nil;
+        if(fabs(open-(cutoff-(count-i)*seconds))>.001 || fabs(close-(open+seconds-.001))>.01 || close>=cutoff) return nil;
         if(i) { double value=price/previous-1; if(!isfinite(value)) return nil; [returns addObject:@(value)]; }
         previous=price;
     }
     return returns;
 }
 static double ReturnCorrelation(NSArray *a, NSArray *b) {
-    if(a.count!=96 || b.count!=96) return NAN;
+    if((a.count!=96 && a.count!=24) || b.count!=a.count) return NAN;
     double ma=0,mb=0;
-    for(NSUInteger i=0;i<a.count;i++) { double x=[a[i] doubleValue],y=[b[i] doubleValue]; if(!isfinite(x)||!isfinite(y)) return NAN; ma+=x/96; mb+=y/96; }
+    for(NSUInteger i=0;i<a.count;i++) { double x=[a[i] doubleValue],y=[b[i] doubleValue]; if(!isfinite(x)||!isfinite(y)) return NAN; ma+=x/a.count; mb+=y/a.count; }
     double xx=0,yy=0,xy=0;
     for(NSUInteger i=0;i<a.count;i++) { double x=[a[i] doubleValue]-ma,y=[b[i] doubleValue]-mb; xx+=x*x; yy+=y*y; xy+=x*y; }
     if(xx<=1e-24 || yy<=1e-24) return NAN;
@@ -71,10 +78,12 @@ static NSArray *RankedMatches(NSArray *matches,BOOL strict) {
     }]; return [sorted subarrayWithRange:NSMakeRange(0,MIN(10,sorted.count))];
 }
 static NSArray *TopMatches(NSArray *matches) { return RankedMatches(matches,YES); }
-static NSString *ScreenKlines(NSString *symbol,double cutoff) {
-    return [NSString stringWithFormat:@"/api/v3/klines?symbol=%@&interval=15m&limit=97&startTime=%.0f&endTime=%.0f",symbol,(cutoff-97*900)*1000,cutoff*1000-1];
+static NSString *ScreenKlines(NSString *symbol,double cutoff,NSString *interval) {
+    NSUInteger seconds=ScreenSeconds(interval),count=ScreenSamples(interval)+1;
+    return [NSString stringWithFormat:@"/api/v3/klines?symbol=%@&interval=%@&limit=%lu&startTime=%.0f&endTime=%.0f",symbol,interval,(unsigned long)count,(cutoff-count*seconds)*1000,cutoff*1000-1];
 }
 @implementation BTCScreener
+-(instancetype)init { if((self=[super init])) _interval=@"15m"; return self; }
 -(void)show {
     if(!self.panel) {
         self.panel=[[NSPanel alloc] initWithContentRect:NSMakeRect(0,0,640,640) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
@@ -83,7 +92,10 @@ static NSString *ScreenKlines(NSString *symbol,double cutoff) {
         self.panel.appearance=[NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
         NSView *view=self.panel.contentView;
         NSTextField *heading=PickerLabel(@"寻找与 BTC 涨跌同步的币",NSMakeRect(24,580,590,30),22); [view addSubview:heading];
-        [view addSubview:PickerLabel(@"市值前 100 · 最近 24 小时 · 15 分钟 K 线",NSMakeRect(24,550,590,24),13)];
+        [view addSubview:PickerLabel(@"市值前 200 · 最近 24 小时",NSMakeRect(24,550,300,24),13)];
+        self.periodControl=[NSSegmentedControl segmentedControlWithLabels:@[@"15分钟",@"1小时"] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(selectPeriod:)];
+        self.periodControl.frame=NSMakeRect(366,548,250,28); self.periodControl.selectedSegment=[self.interval isEqual:@"1h"]?1:0;
+        self.periodControl.toolTip=@"切换K线周期后重新比较最近24小时"; [view addSubview:self.periodControl];
         [view addSubview:PickerLabel(@"相关性越接近 1，涨跌越同步。默认仅显示高度同步，最多 10 个。",NSMakeRect(24,526,590,22),12)];
         self.strictButton=[NSButton checkboxWithTitle:@"仅显示高度同步（≥ 0.80）；取消勾选可看最接近的 10 个" target:self action:@selector(displayResults:)];
         self.strictButton.state=NSControlStateValueOn; self.strictButton.frame=NSMakeRect(24,503,592,20); [view addSubview:self.strictButton];
@@ -97,7 +109,7 @@ static NSString *ScreenKlines(NSString *symbol,double cutoff) {
             NSTableColumn *column=[[NSTableColumn alloc] initWithIdentifier:col[0]]; column.title=col[1]; column.width=[col[2] doubleValue]; column.resizingMask=NSTableColumnNoResizing; [self.table addTableColumn:column];
         }
         scroll.documentView=self.table; [view addSubview:scroll];
-        self.detailLabel=PickerLabel(@"排除 BTC、稳定币、BTC 锚定币；只比较币安可交易的 USDT 现货。\n市值及分类：CoinGecko · K 线：Binance",NSMakeRect(24,10,592,64),11); self.detailLabel.textColor=NSColor.secondaryLabelColor; [view addSubview:self.detailLabel];
+        self.detailLabel=PickerLabel(@"排除 BTC、稳定币、BTC 锚定币；只比较币安可交易的 USDT 现货。\n市值及分类：CoinGecko · K 线：Binance",NSMakeRect(24,10,592,64),11); self.detailLabel.textColor=NSColor.secondaryLabelColor; self.detailLabel.toolTip=@"不可用/过期包括：没有币安USDT现货、简称重复，或市值记录超过1小时未更新。"; [view addSubview:self.detailLabel];
         [self.panel center];
     }
     [NSApp activateIgnoringOtherApps:YES]; [self.panel makeKeyAndOrderFront:nil];
@@ -114,7 +126,7 @@ static NSString *ScreenKlines(NSString *symbol,double cutoff) {
 }
 -(void)openCoin:(NSButton *)sender {
     if(sender.tag<0 || sender.tag>=self.results.count) return;
-    NSDictionary *coin=self.results[sender.tag]; [self.owner createSingleWindow:coin[@"pair"] digits:[coin[@"digits"] integerValue] record:nil]; [self.panel orderOut:nil];
+    NSDictionary *coin=self.results[sender.tag]; [self.owner createSingleWindow:coin[@"pair"] digits:[coin[@"digits"] integerValue] record:@{@"interval":coin[@"interval"]?:self.interval}]; [self.panel orderOut:nil];
 }
 -(BOOL)windowShouldClose:(NSWindow *)window { [self cancel:nil]; [self.panel orderOut:nil]; return NO; }
 -(void)stop { [self.deadlineTimer invalidate]; self.deadlineTimer=nil; self.generation++; self.running=NO; [self.session invalidateAndCancel]; self.session=nil; [self.progress stopAnimation:nil]; self.progress.hidden=YES; self.cancelButton.enabled=NO; self.searchButton.enabled=YES; self.strictButton.enabled=YES; }
@@ -137,16 +149,24 @@ static NSString *ScreenKlines(NSString *symbol,double cutoff) {
         if(error && endpoint+1<APIHosts().count) [self fetchBinance:path endpoint:endpoint+1 token:token completion:completion]; else completion(json,error);
     }];
 }
+-(void)selectPeriod:(id)sender {
+    NSString *next=self.periodControl.selectedSegment==1?@"1h":@"15m";
+    if([next isEqual:self.interval]) return;
+    [self stop]; self.interval=next;
+    self.results=@[]; self.matches=[NSMutableArray new]; self.candidates=@[]; self.completed=0;
+    self.detailLabel.stringValue=@"排除 BTC、稳定币、BTC 锚定币；只比较币安可交易的 USDT 现货。\n市值及分类：CoinGecko · K 线：Binance";
+    [self.table reloadData]; [self start:nil];
+}
 -(void)start:(id)sender {
     if(self.running) return;
     if(Now()<self.cooldownUntil) { self.statusLabel.stringValue=[NSString stringWithFormat:@"数据源限流，还需等待 %.0f 秒。",ceil(self.cooldownUntil-Now())]; return; }
     [self stop]; self.running=YES; NSInteger token=self.generation;
     // Freeze a shared time grid for the whole scan, excluding the currently forming candle.
-    self.cutoff=floor(Now()/900)*900;
+    NSUInteger seconds=ScreenSeconds(self.interval); self.cutoff=floor(Now()/seconds)*seconds;
     self.results=@[]; self.matches=[NSMutableArray new]; self.candidates=@[]; self.btcReturns=nil;
     self.nextIndex=0; self.active=0; self.completed=0; self.failed=0;
     [self.table reloadData]; self.strictButton.enabled=NO; self.searchButton.enabled=NO; self.searchButton.title=@"重新搜索"; self.cancelButton.enabled=YES;
-    self.progress.hidden=NO; self.progress.indeterminate=YES; [self.progress startAnimation:nil]; self.statusLabel.stringValue=@"正在获取市值前 100 和币种分类…";
+    self.progress.hidden=NO; self.progress.indeterminate=YES; [self.progress startAnimation:nil]; self.statusLabel.stringValue=@"正在获取市值前 200 和币种分类…";
     NSURLSessionConfiguration *config=NSURLSessionConfiguration.ephemeralSessionConfiguration; config.timeoutIntervalForRequest=10; config.timeoutIntervalForResource=15; config.HTTPMaximumConnectionsPerHost=4; config.waitsForConnectivity=NO;
     self.session=[NSURLSession sessionWithConfiguration:config];
     self.detailLabel.stringValue=@"排除 BTC、稳定币、BTC 锚定币；只比较币安可交易的 USDT 现货。\n市值及分类：CoinGecko · K 线：Binance";
@@ -156,7 +176,7 @@ static NSString *ScreenKlines(NSString *symbol,double cutoff) {
     [self loadUniverse:token];
 }
 -(void)loadUniverse:(NSInteger)token {
-    if(Now()-self.cacheTime<300 && self.cachedMarkets && self.cachedExcluded) { [self loadExchange:token]; return; }
+    if(Now()-self.cacheTime<300 && self.cachedMarkets.count==200 && self.cachedExcluded) { [self loadExchange:token]; return; }
     [self fetchJSON:MarketURL(nil) token:token completion:^(id json,NSString *error) {
         NSArray *markets=ScreenMarkets(json,Now()); if(!markets) { [self fail:error?:@"市值榜不完整或已过期，本次未生成结果。请稍后重试。"]; return; }
         [self fetchJSON:MarketURL(@"stablecoins") token:token completion:^(id stable,NSString *stableError) {
@@ -176,8 +196,8 @@ static NSString *ScreenKlines(NSString *symbol,double cutoff) {
         self.candidates=ScreenCandidates(self.cachedMarkets,self.cachedExcluded,json,&removed,&unsupported); self.excludedCount=removed; self.unsupportedCount=unsupported;
         if(error || !self.candidates.count) { [self fail:error?:@"未找到可比较的 USDT 现货币种。"]; return; }
         self.statusLabel.stringValue=@"正在获取 BTC 的已收盘 K 线…";
-        [self fetchBinance:ScreenKlines(@"BTCUSDT",self.cutoff) endpoint:0 token:token completion:^(id data,NSString *err) {
-            self.btcReturns=AlignedReturns(data,self.cutoff);
+        [self fetchBinance:ScreenKlines(@"BTCUSDT",self.cutoff,self.interval) endpoint:0 token:token completion:^(id data,NSString *err) {
+            self.btcReturns=AlignedReturns(data,self.cutoff,self.interval);
             if(err || !self.btcReturns || !isfinite(ReturnCorrelation(self.btcReturns,self.btcReturns))) { [self fail:@"BTC 数据缺失、未对齐或无有效波动，无法计算。请重新搜索。"]; return; }
             self.progress.indeterminate=NO; self.progress.doubleValue=0; [self pump:token];
         }];
@@ -187,11 +207,11 @@ static NSString *ScreenKlines(NSString *symbol,double cutoff) {
     if(!self.running || token!=self.generation) return;
     while(self.active<4 && self.nextIndex<self.candidates.count) {
         NSDictionary *coin=self.candidates[self.nextIndex++]; self.active++;
-        [self fetchBinance:ScreenKlines(coin[@"pair"],self.cutoff) endpoint:0 token:token completion:^(id json,NSString *error) {
+        [self fetchBinance:ScreenKlines(coin[@"pair"],self.cutoff,self.interval) endpoint:0 token:token completion:^(id json,NSString *error) {
             self.active--; self.completed++;
-            NSArray *returns=error?nil:AlignedReturns(json,self.cutoff);
+            NSArray *returns=error?nil:AlignedReturns(json,self.cutoff,self.interval);
             double r=returns?ReturnCorrelation(self.btcReturns,returns):NAN;
-            if(isfinite(r)) { NSMutableDictionary *match=[coin mutableCopy]; match[@"correlation"]=@(r); [self.matches addObject:match]; } else self.failed++;
+            if(isfinite(r)) { NSMutableDictionary *match=[coin mutableCopy]; match[@"correlation"]=@(r); match[@"interval"]=self.interval; [self.matches addObject:match]; } else self.failed++;
             self.progress.doubleValue=100.0*self.completed/self.candidates.count;
             self.statusLabel.stringValue=[NSString stringWithFormat:@"正在比较 %lu / %lu 个币种…",(unsigned long)self.completed,(unsigned long)self.candidates.count];
             [self pump:token];
@@ -210,8 +230,8 @@ static NSString *ScreenKlines(NSString *symbol,double cutoff) {
     NSDateFormatter *dates=[NSDateFormatter new]; dates.timeZone=[NSTimeZone timeZoneWithName:@"Asia/Shanghai"]; dates.dateFormat=@"MM/dd HH:mm";
     NSString *from=[dates stringFromDate:[NSDate dateWithTimeIntervalSince1970:self.cutoff-86400]],*to=[dates stringFromDate:[NSDate dateWithTimeIntervalSince1970:self.cutoff]];
     NSString *summary=strict?(self.results.count?[NSString stringWithFormat:@"找到 %lu 个高度同步币种%@",(unsigned long)self.results.count,self.results.count<10?@"，不足10个不凑数":@""]:@"没有达到0.80的币；取消勾选可查看最接近的10个。"):[NSString stringWithFormat:@"最接近 BTC 的 %lu 个币（含未达到0.80标准的结果）",(unsigned long)self.results.count];
-    self.statusLabel.stringValue=[NSString stringWithFormat:@"%@%@\n%@ — %@（北京时间，96 个已收盘涨跌幅）",self.failed?@"部分完成：":@"",summary,from,to];
-    self.detailLabel.stringValue=[NSString stringWithFormat:@"市值前100：排除 %lu · 无可用币对/简称重复 %lu · 成功比较 %lu · 数据不足/失败 %lu\n市值及分类：CoinGecko（缓存最多5分钟）· K线：Binance\n相关性描述过去24小时的同步程度，不代表后续涨跌。",(unsigned long)self.excludedCount,(unsigned long)self.unsupportedCount,(unsigned long)self.matches.count,(unsigned long)self.failed];
+    self.statusLabel.stringValue=[NSString stringWithFormat:@"%@%@\n%@ — %@（北京 · %@ · %lu个已收盘涨跌幅）",self.failed?@"部分完成：":@"",summary,from,to,[self.interval isEqual:@"1h"]?@"1小时":@"15分钟",(unsigned long)ScreenSamples(self.interval)];
+    self.detailLabel.stringValue=[NSString stringWithFormat:@"市值前200：排除 %lu · 不可用/过期 %lu · 成功比较 %lu · 数据不足/失败 %lu\n市值及分类：CoinGecko（缓存最多5分钟）· K线：Binance\n相关性描述过去24小时的同步程度，不代表后续涨跌。",(unsigned long)self.excludedCount,(unsigned long)self.unsupportedCount,(unsigned long)self.matches.count,(unsigned long)self.failed];
 }
 @end
 @implementation Controller (Screening)
