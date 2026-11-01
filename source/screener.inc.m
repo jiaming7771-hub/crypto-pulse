@@ -129,7 +129,7 @@ static NSString *ScreenKlines(NSString *symbol,double cutoff,NSString *interval)
     NSDictionary *coin=self.results[sender.tag]; [self.owner createSingleWindow:coin[@"pair"] digits:[coin[@"digits"] integerValue] record:@{@"interval":coin[@"interval"]?:self.interval}]; [self.panel orderOut:nil];
 }
 -(BOOL)windowShouldClose:(NSWindow *)window { [self cancel:nil]; [self.panel orderOut:nil]; return NO; }
--(void)stop { [self.deadlineTimer invalidate]; self.deadlineTimer=nil; self.generation++; self.running=NO; [self.session invalidateAndCancel]; self.session=nil; [self.progress stopAnimation:nil]; self.progress.hidden=YES; self.cancelButton.enabled=NO; self.searchButton.enabled=YES; self.strictButton.enabled=YES; }
+-(void)stop { [self.deadlineTimer invalidate]; self.deadlineTimer=nil; self.generation++; self.running=NO; [self.session invalidateAndCancel]; self.session=nil; [self.progress stopAnimation:nil]; self.progress.hidden=YES; self.cancelButton.enabled=NO; self.searchButton.enabled=YES; self.strictButton.enabled=self.matches.count>0 && self.completed==self.candidates.count; }
 -(void)cancel:(id)sender { BOOL wasRunning=self.running; [self stop]; if(wasRunning) self.statusLabel.stringValue=@"已取消，本次未完成的结果不作为榜单。点击重新搜索。"; }
 -(void)fail:(NSString *)message { [self stop]; self.statusLabel.stringValue=message; self.searchButton.title=@"重新搜索"; }
 -(void)fetchJSON:(NSString *)url token:(NSInteger)token completion:(void (^)(id,NSString *))completion {
@@ -230,7 +230,10 @@ static NSString *ScreenKlines(NSString *symbol,double cutoff,NSString *interval)
     NSDateFormatter *dates=[NSDateFormatter new]; dates.timeZone=[NSTimeZone timeZoneWithName:@"Asia/Shanghai"]; dates.dateFormat=@"MM/dd HH:mm";
     NSString *from=[dates stringFromDate:[NSDate dateWithTimeIntervalSince1970:self.cutoff-86400]],*to=[dates stringFromDate:[NSDate dateWithTimeIntervalSince1970:self.cutoff]];
     NSString *summary=strict?(self.results.count?[NSString stringWithFormat:@"找到 %lu 个高度同步币种%@",(unsigned long)self.results.count,self.results.count<10?@"，不足10个不凑数":@""]:@"没有达到0.80的币；取消勾选可查看最接近的10个。"):[NSString stringWithFormat:@"最接近 BTC 的 %lu 个币（含未达到0.80标准的结果）",(unsigned long)self.results.count];
-    self.statusLabel.stringValue=[NSString stringWithFormat:@"%@%@\n%@ — %@（北京 · %@ · %lu个已收盘涨跌幅）",self.failed?@"部分完成：":@"",summary,from,to,[self.interval isEqual:@"1h"]?@"1小时":@"15分钟",(unsigned long)ScreenSamples(self.interval)];
+    BOOL noData=self.matches.count==0;
+    self.strictButton.enabled=!noData;
+    if(noData) summary=@"未取得可比较的 K 线，暂无结果。请重新搜索。";
+    self.statusLabel.stringValue=[NSString stringWithFormat:@"%@%@\n%@ — %@（北京 · %@ · %lu个已收盘涨跌幅）",self.failed && !noData?@"部分完成：":@"",summary,from,to,[self.interval isEqual:@"1h"]?@"1小时":@"15分钟",(unsigned long)ScreenSamples(self.interval)];
     self.detailLabel.stringValue=[NSString stringWithFormat:@"市值前200：排除 %lu · 不可用/过期 %lu · 成功比较 %lu · 数据不足/失败 %lu\n市值及分类：CoinGecko（缓存最多5分钟）· K线：Binance\n相关性描述过去24小时的同步程度，不代表后续涨跌。",(unsigned long)self.excludedCount,(unsigned long)self.unsupportedCount,(unsigned long)self.matches.count,(unsigned long)self.failed];
 }
 @end

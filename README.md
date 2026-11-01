@@ -53,6 +53,14 @@ macOS 桌面置顶 BTC / ETH / PENDLE 行情工具，使用 Binance 公开行情
 
 验证：`./test.command --screener`（计算与故障回归）、`./test.command --screener-live`（完整真实扫描及结果打开）。见 [v1.14 筛选验收记录](QA-screener-v1.14-2026-11-01.md)，此前记录见 [v1.13](QA-screener-2026-11-01.md)。
 
+## v1.15 普通用户流程验收
+
+修复同步榜全部候选数据失败时仍显示“没有达到相关性标准”的误导提示；现在明确显示暂无可比较数据，并提供重新搜索。
+
+新增 `./test.command --journey`，通过真实AppKit控件完成输入纠错、展开/收起K线、取消重搜、快速切换周期、结果打开和关闭恢复。设置 `PULSE_JOURNEY_CAPTURE=1` 可捕获关键实际窗口（需要系统允许截图）。此测试隔离应用设置，使用真实公开行情；按钮由程序触发，不等同于实体鼠标或系统辅助功能操作。
+
+见 [普通用户最终验收记录](QA-user-acceptance-2026-11-01.md)。
+
 ## 构建和启动
 
 需要 macOS 13 或更高版本，以及 Xcode Command Line Tools。

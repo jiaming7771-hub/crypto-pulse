@@ -8,6 +8,21 @@ if [[ "${1:-}" == "--live" ]]; then
     clang -fobjc-arc -fmodules -fmodules-cache-path=/tmp/cryptopulse-clang-cache -mmacosx-version-min=13.0 tests/live.m -o .build/test-live -framework Cocoa
     .build/test-live
 fi
+if [[ "${1:-}" == "--journey" ]]; then
+    TEST_APP=".build/JourneyTests.app"
+    mkdir -p "$TEST_APP/Contents/MacOS"
+    cat > "$TEST_APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>JourneyTests</string>
+<key>CFBundleIdentifier</key><string>local.bai.cryptopulsemini.journey-tests</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleName</key><string>Crypto Pulse Journey Tests</string>
+</dict></plist>
+PLIST
+    clang -fobjc-arc -fmodules -fmodules-cache-path=/tmp/cryptopulse-clang-cache -mmacosx-version-min=13.0 tests/journey.m -o "$TEST_APP/Contents/MacOS/JourneyTests" -framework Cocoa
+    "$TEST_APP/Contents/MacOS/JourneyTests"
+fi
 if [[ "${1:-}" == "--soak" ]]; then
     TEST_APP=".build/SoakTests.app"
     mkdir -p "$TEST_APP/Contents/MacOS"
