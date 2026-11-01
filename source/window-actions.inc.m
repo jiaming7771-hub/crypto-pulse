@@ -39,9 +39,26 @@ static NSArray<NSValue *> *TileCells(NSArray<NSNumber *> *heights, NSArray<NSNum
 -(void)togglePinned:(id)sender { self.pinned=!self.pinned; [self applyWindowAppearance]; [self saveSingleWindows]; }
 -(void)toggleSnap:(id)sender { self.snapEnabled=!self.snapEnabled; [self saveSingleWindows]; }
 -(void)setOpacityFromMenu:(NSMenuItem *)sender { self.opacity=MAX(.6,MIN(1,sender.tag/100.0)); [self applyWindowAppearance]; [self saveSingleWindows]; }
+-(BOOL)leftMouseIsDown { return (NSEvent.pressedMouseButtons & 1)!=0; }
+-(void)beginWindowDrag {
+    [self.dragEndTimer invalidate]; self.dragEndTimer=nil;
+    if(!self.snapEnabled || self.closed) return;
+    self.lastDragMovement=Now();
+    __weak Controller *weakSelf=self;
+    // Native window dragging returns immediately and may consume the mouse-up event.
+    // Common modes keep this check active while AppKit tracks the drag.
+    self.dragEndTimer=[NSTimer timerWithTimeInterval:.05 repeats:YES block:^(NSTimer *timer) { [weakSelf checkWindowDragEnd]; }];
+    [NSRunLoop.mainRunLoop addTimer:self.dragEndTimer forMode:NSRunLoopCommonModes];
+}
+-(void)checkWindowDragEnd {
+    if(!self.dragEndTimer) return;
+    if(!self.closed && self.snapEnabled && ([self leftMouseIsDown] || Now()-self.lastDragMovement<.1)) return;
+    [self.dragEndTimer invalidate]; self.dragEndTimer=nil;
+    if(!self.closed && self.snapEnabled) [self snapToEdges];
+}
 -(void)snapToEdges {
     if(!self.snapEnabled || self.closed) return;
-    NSRect frame=SnapFrame(self.panel.frame,(self.panel.screen?:NSScreen.mainScreen).visibleFrame,14);
+    NSRect frame=SnapFrame(self.panel.frame,(self.panel.screen?:NSScreen.mainScreen).visibleFrame,24);
     [self.panel setFrame:frame display:YES]; [self saveSingleWindows];
 }
 -(NSMenu *)windowOptions {
@@ -54,7 +71,7 @@ static NSArray<NSValue *> *TileCells(NSArray<NSNumber *> *heights, NSArray<NSNum
     NSMenuItem *pin=[[NSMenuItem alloc] initWithTitle:@"窗口置顶" action:@selector(togglePinned:) keyEquivalent:@""]; pin.target=self; pin.state=self.pinned?NSControlStateValueOn:NSControlStateValueOff; [menu addItem:pin];
     NSMenuItem *opacity=[[NSMenuItem alloc] initWithTitle:@"不透明度" action:nil keyEquivalent:@""]; opacity.submenu=[NSMenu new]; [menu addItem:opacity];
     for(NSNumber *value in @[@100,@90,@80,@70,@60]) { NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%@%%%@",value,value.intValue==100?@"（完全不透明）":@""] action:@selector(setOpacityFromMenu:) keyEquivalent:@""]; item.tag=value.integerValue; item.target=self; item.state=fabs(self.opacity*100-value.doubleValue)<.5?NSControlStateValueOn:NSControlStateValueOff; [opacity.submenu addItem:item]; }
-    NSMenuItem *snap=[[NSMenuItem alloc] initWithTitle:@"松手时贴边吸附" action:@selector(toggleSnap:) keyEquivalent:@""]; snap.target=self; snap.state=self.snapEnabled?NSControlStateValueOn:NSControlStateValueOff; [menu addItem:snap];
+    NSMenuItem *snap=[[NSMenuItem alloc] initWithTitle:@"拖到屏幕边缘自动贴齐" action:@selector(toggleSnap:) keyEquivalent:@""]; snap.target=self; snap.state=self.snapEnabled?NSControlStateValueOn:NSControlStateValueOff; [menu addItem:snap];
     return menu;
 }
 -(void)showWindowOptions:(id)sender {

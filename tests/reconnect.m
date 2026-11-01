@@ -290,5 +290,16 @@ int main(void) { @autoreleasepool {
     double low,high; ChartRange(Candles(),&low,&high); Check(low<9 && high>12 && isfinite(low) && isfinite(high),@"crosshair uses same padded range as the candles");
     c=Fixture(); Check(NSEqualRects([c plotRectAtIndex:2],NSMakeRect(17,[c rowY:2]+139,225,137)),@"expanded charts map hover to each row's own plot");
     puts("PASS: same-window coin switch, stale callback isolation, appearance, snap, tiling and crosshair mapping");
+    NSArray *up=@[@0,@"100",@"120",@"90",@"110",@"999",@1,@"12345.67"];
+    NSArray *down=@[@0,@"100",@"110",@"80",@"90",@"999",@1,@"0"];
+    Check(fabs(CandleChange(up)-10)<.0001 && fabs(CandleChange(down)+10)<.0001,@"hover change is candle close vs open, with correct sign");
+    Check(fabs(CandleAmplitude(up)-30)<.0001 && fabs(CandleAmplitude(down)-30)<.0001,@"amplitude uses candle high-low divided by open");
+    Check([CandleTurnover(up) isEqual:@"12,345.67 USDT"] && [CandleTurnover(down) isEqual:@"0.00 USDT"],@"turnover uses quote asset volume, not base volume; zero is valid");
+    Check([CandleTurnover(Candles().firstObject) isEqual:@"—"],@"missing turnover does not invent zero");
+    for(id invalid in @[@"NaN",@"-1",@"12oops",@"inf",@12,NSNull.null]) {
+        NSMutableArray *row=[up mutableCopy]; row[7]=invalid;
+        Check([CandleTurnover(row) isEqual:@"—"],@"malformed turnover displays unavailable");
+    }
+    puts("PASS: selected-candle amplitude, signed change, USDT turnover and invalid/missing volume");
     return 0;
 } }

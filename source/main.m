@@ -37,7 +37,8 @@
 @property NSURLSession *streamSession;
 @property NSURLSessionWebSocketTask *socket;
 @property NSURLSessionDataTask *pollTask;
-@property NSTimer *timer;
+@property NSTimer *timer, *dragEndTimer;
+@property double lastDragMovement;
 @property double lastWS, lastPoll, lastConnect, started, retryAt, delay, lastRecovery;
 @property NSInteger generation, pollGeneration;
 @property NSUInteger apiIndex, streamIndex, routeIndex;
@@ -105,6 +106,9 @@
 -(void)replaceSymbol:(NSString *)symbol digits:(NSInteger)digits;
 -(void)arrangeWindows:(id)sender;
 -(void)snapToEdges;
+-(void)beginWindowDrag;
+-(BOOL)leftMouseIsDown;
+-(void)checkWindowDragEnd;
 -(void)togglePinned:(id)sender;
 -(void)toggleSnap:(id)sender;
 -(void)setOpacityFromMenu:(NSMenuItem *)sender;
@@ -163,6 +167,18 @@ static void ChartRange(NSArray *rows, double *low, double *high) {
 }
 static NSUInteger HoverIndex(NSUInteger count, double fraction) { return count?MIN(count-1,(NSUInteger)floor(MAX(0,MIN(1,fraction))*count)):0; }
 static double HoverPrice(double low, double high, double fraction) { return high-(high-low)*MAX(0,MIN(1,fraction)); }
+// Rates are relative to this candle's open, not the rolling 24-hour ticker.
+static double CandleChange(NSArray *row) { return ([row[4] doubleValue]/[row[1] doubleValue]-1)*100; }
+static double CandleAmplitude(NSArray *row) { return ([row[2] doubleValue]-[row[3] doubleValue])/[row[1] doubleValue]*100; }
+static NSString *CandleTurnover(NSArray *row) {
+    // Binance klines index 7 is quote-asset volume (USDT for these markets).
+    if(row.count<8 || ![row[7] isKindOfClass:NSString.class]) return @"—";
+    NSScanner *scanner=[NSScanner scannerWithString:row[7]]; double amount;
+    if(![scanner scanDouble:&amount] || !scanner.atEnd || !isfinite(amount) || amount<0) return @"—";
+    NSNumberFormatter *format=[NSNumberFormatter new]; format.locale=[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+    format.numberStyle=NSNumberFormatterDecimalStyle; format.usesGroupingSeparator=YES; format.groupingSize=3; format.minimumFractionDigits=2; format.maximumFractionDigits=2;
+    return [[format stringFromNumber:@(amount)] stringByAppendingString:@" USDT"];
+}
 @implementation PanelView
 -(BOOL)isFlipped { return YES; }
 // Keep the visible resize target eight screen points wide at every zoom level.
@@ -253,7 +269,7 @@ static double HoverPrice(double low, double high, double fraction) { return high
 }
 -(void)mouseDown:(NSEvent *)event {
     NSUInteger edges=[self resizeEdgesAt:[self convertPoint:event.locationInWindow fromView:nil]];
-    if(!edges) { [self.window performWindowDragWithEvent:event]; [self.owner snapToEdges]; return; }
+    if(!edges) { [self.owner beginWindowDrag]; [self.window performWindowDragWithEvent:event]; return; }
     NSRect initial=self.window.frame;
     NSPoint start=[self.window convertPointToScreen:event.locationInWindow];
     NSCursor *cursor=[self cursorForEdges:edges]; [cursor push];
@@ -423,7 +439,7 @@ static double HoverPrice(double low, double high, double fraction) { return high
     if(self.picker.visible && !self.picker.screen) [self.picker center];
 }
 -(void)windowDidResize:(NSNotification *)n { if(!self.windowID) [NSUserDefaults.standardUserDefaults setDouble:self.panel.frame.size.width/310 forKey:@"MiniScale"]; [self saveSingleWindows]; }
--(void)windowDidMove:(NSNotification *)n { [self saveSingleWindows]; }
+-(void)windowDidMove:(NSNotification *)n { if(self.dragEndTimer) self.lastDragMovement=Now(); [self saveSingleWindows]; }
 -(void)zoom:(NSButton *)sender { [self layoutPanel:self.panel.frame.size.width/310+sender.tag*.1]; }
 -(double)baseHeight {
     double height=80+75*self.charts.count;
@@ -511,18 +527,22 @@ static double HoverPrice(double low, double high, double fraction) { return high
         [cross moveToPoint:NSMakePoint(x,299)]; [cross lineToPoint:NSMakePoint(x,436)]; [cross stroke];
         NSString *price=[NSString stringWithFormat:@"%.*f",(int)[self digitsForSymbol:chart.symbol],HoverPrice(lo,hi,chart.hoverFraction.y)];
         double width=MAX(51,[price sizeWithAttributes:@{NSFontAttributeName:[NSFont monospacedDigitSystemFontOfSize:9 weight:NSFontWeightSemibold]}].width+8);
-        [ink setFill]; [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(294-width,yy-9,width,18) xRadius:3 yRadius:3] fill];
-        Label(price,NSMakeRect(297-width,yy-6,width-6,14),9,[NSColor colorWithWhite:.08 alpha:1],YES,YES);
         f.dateFormat=@"MM/dd HH:mm";
         NSString *time=[f stringFromDate:[NSDate dateWithTimeIntervalSince1970:[last[0] doubleValue]/1000]];
         double left=MAX(17,MIN(x-45,152));
         [[NSColor colorWithWhite:.22 alpha:1] setFill]; NSRectFill(NSMakeRect(left,438,90,18));
         Label(time,NSMakeRect(left+4,440,82,15),9,NSColor.whiteColor,NO,NO);
-        double tipX=chart.hoverFraction.x>.5?22:65, tipY=chart.hoverFraction.y<.5?395:304;
-        [[NSColor colorWithWhite:.12 alpha:.96] setFill]; [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(tipX,tipY,160,36) xRadius:4 yRadius:4] fill];
+        double tipX=chart.hoverFraction.x>.5?22:39, tipY=chart.hoverFraction.y<.5?359:304;
+        [[NSColor colorWithWhite:.12 alpha:.97] setFill]; [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(tipX,tipY,198,72) xRadius:4 yRadius:4] fill];
         NSInteger digits=[self digitsForSymbol:chart.symbol];
-        Label([NSString stringWithFormat:@"开 %.*f  高 %.*f",(int)digits,[last[1] doubleValue],(int)digits,[last[2] doubleValue]],NSMakeRect(tipX+5,tipY+4,150,14),8,NSColor.whiteColor,NO,NO);
-        Label([NSString stringWithFormat:@"低 %.*f  收 %.*f",(int)digits,[last[3] doubleValue],(int)digits,[last[4] doubleValue]],NSMakeRect(tipX+5,tipY+19,150,14),8,NSColor.whiteColor,NO,NO);
+        Label([NSString stringWithFormat:@"开 %.*f  高 %.*f",(int)digits,[last[1] doubleValue],(int)digits,[last[2] doubleValue]],NSMakeRect(tipX+6,tipY+5,186,14),9,NSColor.whiteColor,NO,NO);
+        Label([NSString stringWithFormat:@"低 %.*f  收 %.*f",(int)digits,[last[3] doubleValue],(int)digits,[last[4] doubleValue]],NSMakeRect(tipX+6,tipY+21,186,14),9,NSColor.whiteColor,NO,NO);
+        double change=CandleChange(last); if(fabs(change)<.005) change=0;
+        Label([NSString stringWithFormat:@"涨跌幅 %+.2f%%",change],NSMakeRect(tipX+6,tipY+37,100,14),9,change>0?Up():(change<0?Down():NSColor.whiteColor),NO,NO);
+        Label([NSString stringWithFormat:@"振幅 %.2f%%",CandleAmplitude(last)],NSMakeRect(tipX+108,tipY+37,84,14),9,NSColor.whiteColor,NO,YES);
+        Label([@"成交额 " stringByAppendingString:CandleTurnover(last)],NSMakeRect(tipX+6,tipY+53,186,14),9,NSColor.whiteColor,NO,NO);
+        [ink setFill]; [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(294-width,yy-9,width,18) xRadius:3 yRadius:3] fill];
+        Label(price,NSMakeRect(297-width,yy-6,width-6,14),9,[NSColor colorWithWhite:.08 alpha:1],YES,YES);
     }
 }
 -(void)show:(id)sender { [self.panel orderFrontRegardless]; }

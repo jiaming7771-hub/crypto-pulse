@@ -90,6 +90,7 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
 -(void)stop {
     self.closed=YES; self.generation++; self.pollGeneration++;
     [self.timer invalidate]; self.timer=nil;
+    [self.dragEndTimer invalidate]; self.dragEndTimer=nil;
     [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self];
     [NSNotificationCenter.defaultCenter removeObserver:self];
     [self.socket cancelWithCloseCode:NSURLSessionWebSocketCloseCodeGoingAway reason:nil]; self.socket=nil;

@@ -17,6 +17,45 @@ static void Snapshot(NSView *view, NSString *path) {
     [view cacheDisplayInRect:view.bounds toBitmapImageRep:bitmap];
     Require([[bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES],@"snapshot saved");
 }
+// Model the documented native drag handoff: returns immediately, consumes mouse-up.
+@interface DragProbePanel : NSPanel
+@property NSUInteger dragCalls;
+@end
+@implementation DragProbePanel
+-(void)performWindowDragWithEvent:(NSEvent *)event { self.dragCalls++; }
+@end
+@interface DragProbeController : Controller
+@property BOOL held;
+@end
+@implementation DragProbeController
+-(BOOL)leftMouseIsDown { return self.held; }
+-(void)saveSingleWindows {}
+@end
+static void CheckDragLifecycle(void) {
+    DragProbeController *c=[DragProbeController new];
+    ChartState *chart=[ChartState new]; chart.symbol=@"BTCUSDT"; chart.expanded=YES; c.charts=@[chart];
+    NSRect screen=NSScreen.mainScreen.visibleFrame;
+    DragProbePanel *panel=[[DragProbePanel alloc] initWithContentRect:NSMakeRect(NSMinX(screen)+20,NSMinY(screen)+20,310,415) styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
+    panel.releasedWhenClosed=NO; panel.delegate=c; c.panel=panel;
+    c.view=[[PanelView alloc] initWithFrame:NSMakeRect(0,0,310,415)]; c.view.owner=c; panel.contentView=c.view;
+    [c.view setBoundsSize:NSMakeSize(310,415)]; [panel orderFront:nil];
+    NSEvent *down=[NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:NSMakePoint(100,395) modifierFlags:0 timestamp:0 windowNumber:panel.windowNumber context:nil eventNumber:1 clickCount:1 pressure:1];
+    c.held=YES; NSRect initial=panel.frame; [c.view mouseDown:down];
+    Require(panel.dragCalls==1 && c.dragEndTimer && NSEqualRects(initial,panel.frame),@"native drag returns immediately without prematurely snapping");
+    [panel setFrameOrigin:NSMakePoint(NSMaxX(screen)-panel.frame.size.width-20,NSMinY(screen)+20)];
+    Until(^BOOL { return NO; },.2);
+    Require(fabs(NSMaxX(panel.frame)-(NSMaxX(screen)-20))<.1 && c.dragEndTimer,@"holding the pointer leaves dragging free");
+    // No mouse-up is sent to the view. The native button-state watcher must finish it.
+    c.held=NO;
+    Require(Until(^BOOL { return c.dragEndTimer==nil; },1),@"release is detected even without a delivered mouse-up event");
+    Require(fabs(NSMaxX(panel.frame)-NSMaxX(screen))<.1 && fabs(NSMinY(panel.frame)-NSMinY(screen))<.1,@"final position snaps after native drag completes");
+    c.snapEnabled=NO; [panel setFrameOrigin:initial.origin]; [c.view mouseDown:down];
+    Require(!c.dragEndTimer && NSEqualRects(initial,panel.frame),@"disabled snapping leaves final position unchanged");
+    c.snapEnabled=YES; c.held=YES; [c beginWindowDrag]; [c stop];
+    Require(!c.dragEndTimer,@"closing a window cancels drag watching");
+    panel.delegate=nil; [panel close];
+    NSLog(@"PASS: native asynchronous drag lifecycle, held/released state, missing mouse-up, disabled snap and cleanup");
+}
 static void Dispose(Controller *root) {
     [root applicationWillTerminate:[NSNotification notificationWithName:NSApplicationWillTerminateNotification object:NSApp]];
     root.panel.delegate=nil; [root.panel close];
@@ -28,6 +67,7 @@ int main(void) { @autoreleasepool {
     Require([domain isEqual:@"local.bai.cryptopulsemini.window-tests"],@"tests must use isolated preferences");
     [NSUserDefaults.standardUserDefaults removePersistentDomainForName:domain];
     NSApplication *app=NSApplication.sharedApplication; [app finishLaunching];
+    CheckDragLifecycle();
     Controller *root=[Controller new]; [root applicationDidFinishLaunching:[NSNotification notificationWithName:NSApplicationDidFinishLaunchingNotification object:app]];
     NSString *out=NSProcessInfo.processInfo.environment[@"PULSE_TEST_OUTPUT"]?:@".build";
     [root applicationShouldHandleReopen:app hasVisibleWindows:YES];
@@ -68,6 +108,7 @@ int main(void) { @autoreleasepool {
     NSRect plot=[sol plotRectAtIndex:0];
     Require([sol.view updateHoverAt:NSMakePoint(NSMinX(plot)+plot.size.width*.25,NSMinY(plot)+plot.size.height*.37)],@"mouse hovering plot activates crosshair");
     Require(fabs(sol.charts.firstObject.hoverFraction.y-.37)<.0001,@"hover tracks pointer height after scaling");
+    Require(![CandleTurnover(sol.charts.firstObject.candles[HoverIndex(60,.25)]) isEqual:@"—"],@"live selected candle includes quote turnover");
     Snapshot(sol.view,[out stringByAppendingPathComponent:@"crosshair-doge.png"]);
     plot=[tiny plotRectAtIndex:0]; [tiny.view updateHoverAt:NSMakePoint(NSMinX(plot)+plot.size.width*.83,NSMinY(plot)+plot.size.height*.72)];
     Snapshot(tiny.view,[out stringByAppendingPathComponent:@"crosshair-shib.png"]);
