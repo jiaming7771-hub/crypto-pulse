@@ -62,7 +62,7 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
     self.status.button.image=[NSImage imageWithSystemSymbolName:@"chart.line.uptrend.xyaxis" accessibilityDescription:@"Crypto Pulse 行情"];
     NSMenu *(^makeMenu)(void)=^NSMenu *{
         NSMenu *menu=[NSMenu new];
-        for(NSArray *entry in @[@[@"新建单币窗口…",@"newCoinWindow:",@"n"],@[@"一键排列所有窗口",@"arrangeWindows:",@""],@[@"显示主窗口",@"show:",@""],@[@"显示所有行情窗口",@"showAll:",@""],@[@"重新连接所有行情",@"reconnectAll:",@""],@[@"主窗口移到右上角",@"reset:",@""],@[@"退出 Crypto Pulse",@"quit:",@"q"]]) {
+        for(NSArray *entry in @[@[@"新建单币窗口…",@"newCoinWindow:",@"n"],@[@"BTC 同步榜…",@"showScreening:",@""],@[@"一键排列所有窗口",@"arrangeWindows:",@""],@[@"显示主窗口",@"show:",@""],@[@"显示所有行情窗口",@"showAll:",@""],@[@"重新连接所有行情",@"reconnectAll:",@""],@[@"主窗口移到右上角",@"reset:",@""],@[@"退出 Crypto Pulse",@"quit:",@"q"]]) {
             NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:entry[0] action:NSSelectorFromString(entry[1]) keyEquivalent:entry[2]]; item.target=self; [menu addItem:item];
         }
         return menu;
@@ -74,7 +74,7 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
 }
 -(NSMenu *)applicationDockMenu:(NSApplication *)app {
     NSMenu *menu=[NSMenu new];
-    for(NSArray *entry in @[@[@"新建单币窗口…",@"newCoinWindow:"],@[@"一键排列所有窗口",@"arrangeWindows:"],@[@"显示主窗口",@"show:"],@[@"显示所有行情窗口",@"showAll:"]]) {
+    for(NSArray *entry in @[@[@"新建单币窗口…",@"newCoinWindow:"],@[@"BTC 同步榜…",@"showScreening:"],@[@"一键排列所有窗口",@"arrangeWindows:"],@[@"显示主窗口",@"show:"],@[@"显示所有行情窗口",@"showAll:"]]) {
         NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:entry[0] action:NSSelectorFromString(entry[1]) keyEquivalent:@""]; item.target=self; [menu addItem:item];
     }
     return menu;

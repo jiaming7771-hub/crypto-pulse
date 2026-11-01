@@ -21,7 +21,7 @@
 @implementation ChartState
 -(instancetype)init { if((self=[super init])) { _interval=@"15m"; _candles=@[]; _buttons=[NSMutableArray new]; } return self; }
 @end
-@class Controller;
+@class Controller, BTCScreener;
 @interface PanelView : NSView
 @property (weak) Controller *owner;
 @property NSTrackingArea *resizeTracking;
@@ -53,6 +53,7 @@
 @property NSString *windowID;
 @property BOOL closed, restoringWindows, didLaunch;
 @property NSPanel *picker;
+@property BTCScreener *screener;
 @property NSComboBox *coinInput;
 @property NSTextField *pickerMessage;
 @property NSButton *openCoinButton;
@@ -116,6 +117,39 @@
 -(void)applyWindowAppearance;
 -(void)restoreAppearance:(NSDictionary *)record;
 -(NSDictionary *)appearanceRecord;
+@end
+@interface BTCScreener : NSObject <NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate>
+@property (weak) Controller *owner;
+@property NSPanel *panel;
+@property NSTextField *statusLabel, *detailLabel;
+@property NSButton *searchButton, *cancelButton, *strictButton;
+@property NSProgressIndicator *progress;
+@property NSTimer *deadlineTimer;
+@property NSTableView *table;
+@property NSURLSession *session;
+@property NSInteger generation;
+@property BOOL running;
+@property double cutoff, cooldownUntil, cacheTime;
+@property NSArray *cachedMarkets, *candidates, *btcReturns, *results;
+@property NSSet *cachedExcluded;
+@property NSMutableArray *matches;
+@property NSUInteger nextIndex, active, completed, failed, excludedCount, unsupportedCount;
+-(void)show;
+-(void)start:(id)sender;
+-(void)cancel:(id)sender;
+-(void)stop;
+-(void)fetchJSON:(NSString *)url token:(NSInteger)token completion:(void (^)(id,NSString *))completion;
+-(void)fetchBinance:(NSString *)path endpoint:(NSUInteger)endpoint token:(NSInteger)token completion:(void (^)(id,NSString *))completion;
+-(void)loadUniverse:(NSInteger)token;
+-(void)loadExchange:(NSInteger)token;
+-(void)pump:(NSInteger)token;
+-(void)finish;
+-(void)displayResults:(id)sender;
+-(void)fail:(NSString *)message;
+-(void)openCoin:(NSButton *)sender;
+@end
+@interface Controller (Screening)
+-(void)showScreening:(id)sender;
 @end
 static NSColor *Up(void) { return [NSColor colorWithRed:.32 green:.88 blue:.68 alpha:1]; }
 static NSColor *Down(void) { return [NSColor colorWithRed:1 green:.43 blue:.49 alpha:1]; }
@@ -563,7 +597,7 @@ static NSString *CandleTurnover(NSArray *row) {
 -(void)reset:(id)sender { NSRect r=NSScreen.mainScreen.visibleFrame; [self.panel setFrameOrigin:NSMakePoint(NSMaxX(r)-334,NSMaxY(r)-254)]; [self show:nil]; }
 -(void)quit:(id)sender { [NSApp terminate:nil]; }
 -(void)applicationWillTerminate:(NSNotification *)notification {
-    [self saveSingleWindows]; [self cancelPicker:nil];
+    [self saveSingleWindows]; [self cancelPicker:nil]; [self.screener stop];
     for(Controller *child in self.singleWindows.copy) [child stop];
     [self stop];
 }
@@ -719,6 +753,7 @@ static NSString *CandleTurnover(NSArray *row) {
 @end
 #import "windows.inc.m"
 #import "window-actions.inc.m"
+#import "screener.inc.m"
 int main(int argc,const char *argv[]) { @autoreleasepool {
     if(argc>1 && strcmp(argv[1],"--self-test")==0) {
         Controller *c=[Controller new]; c.quotes=[NSMutableDictionary new];

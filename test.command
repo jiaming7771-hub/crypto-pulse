@@ -54,3 +54,22 @@ PLIST
     clang -fobjc-arc -fmodules -fmodules-cache-path=/tmp/cryptopulse-clang-cache -mmacosx-version-min=13.0 tests/deep.m -o "$TEST_APP/Contents/MacOS/DeepTests" -framework Cocoa
     "$TEST_APP/Contents/MacOS/DeepTests"
 fi
+if [[ "${1:-}" == "--screener" || "${1:-}" == "--screener-live" ]]; then
+    TEST_APP=".build/ScreenerTests.app"
+    mkdir -p "$TEST_APP/Contents/MacOS"
+    cat > "$TEST_APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>ScreenerTests</string>
+<key>CFBundleIdentifier</key><string>local.bai.cryptopulsemini.screener-tests</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleName</key><string>Crypto Pulse Screener Tests</string>
+</dict></plist>
+PLIST
+    clang -fobjc-arc -fmodules -fmodules-cache-path=/tmp/cryptopulse-clang-cache -mmacosx-version-min=13.0 tests/screener.m -o "$TEST_APP/Contents/MacOS/ScreenerTests" -framework Cocoa
+    if [[ "${1:-}" == "--screener-live" ]]; then
+        "$TEST_APP/Contents/MacOS/ScreenerTests" --live
+    else
+        "$TEST_APP/Contents/MacOS/ScreenerTests"
+    fi
+fi

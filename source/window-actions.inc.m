@@ -64,7 +64,7 @@ static NSArray<NSValue *> *TileCells(NSArray<NSNumber *> *heights, NSArray<NSNum
 -(NSMenu *)windowOptions {
     NSMenu *menu=[NSMenu new];
     if(self.windowID) { NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:@"切换这个窗口的币种…" action:@selector(switchCoin:) keyEquivalent:@""]; item.target=self; [menu addItem:item]; }
-    for(NSArray *entry in @[@[@"新建单币窗口…",@"newCoinWindow:"],@[@"一键排列所有窗口",@"arrangeWindows:"]]) {
+    for(NSArray *entry in @[@[@"新建单币窗口…",@"newCoinWindow:"],@[@"BTC 同步榜…",@"showScreening:"],@[@"一键排列所有窗口",@"arrangeWindows:"]]) {
         NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:entry[0] action:NSSelectorFromString(entry[1]) keyEquivalent:@""]; item.target=self; [menu addItem:item];
     }
     [menu addItem:NSMenuItem.separatorItem];
