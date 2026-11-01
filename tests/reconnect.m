@@ -301,5 +301,15 @@ int main(void) { @autoreleasepool {
         Check([CandleTurnover(row) isEqual:@"—"],@"malformed turnover displays unavailable");
     }
     puts("PASS: selected-candle amplitude, signed change, USDT turnover and invalid/missing volume");
+    c=Fixture();
+    for(NSString *symbol in Symbols()) [c accept:@{@"s":symbol,@"c":@"100",@"P":@"1",@"E":@(Now()*1000)} live:YES];
+    [c poll];
+    NSMutableArray *older=[NSMutableArray new];
+    for(NSString *symbol in Symbols()) [older addObject:@{@"symbol":symbol,@"lastPrice":@"99",@"priceChangePercent":@"1",@"closeTime":@((Now()-2)*1000)}];
+    [(FakeTask *)(id)c.pollTask finish:older error:NO];
+    Check(c.apiIndex==0 && !c.networkError && c.quotes[@"BTCUSDT"].price==100,@"a valid poll superseded by fresher stream data is not a network failure");
+    [c poll]; [(FakeTask *)(id)c.pollTask finish:@[@{@"symbol":@"BTCUSDT"}] error:NO];
+    Check(c.apiIndex==1,@"malformed successful responses still trigger fallback even with fresh stream quotes");
+    puts("PASS: poll/stream race keeps newer quotes without false endpoint failures");
     return 0;
 } }

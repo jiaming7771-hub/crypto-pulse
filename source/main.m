@@ -82,6 +82,7 @@
 -(void)requestFailed:(NSError *)error response:(NSURLResponse *)response endpoint:(NSUInteger)endpoint;
 -(void)reconnect:(id)sender;
 -(BOOL)accept:(NSDictionary *)item live:(BOOL)live;
+-(Quote *)parsedQuote:(NSDictionary *)item live:(BOOL)live;
 @end
 @interface Controller (Windows)
 -(void)setupWindowCommands;
@@ -357,6 +358,14 @@ static NSString *CandleTurnover(NSArray *row) {
     NSMutableArray *charts=[NSMutableArray new];
     for(NSString *symbol in self.symbols) { ChartState *chart=[ChartState new]; chart.symbol=symbol; [charts addObject:chart]; }
     if(!self.charts) self.charts=charts;
+    if(!self.windowID) {
+        id saved=[NSUserDefaults.standardUserDefaults objectForKey:@"MainChartSettings"];
+        if([saved isKindOfClass:NSDictionary.class]) for(ChartState *chart in self.charts) {
+            id record=saved[chart.symbol]; if(![record isKindOfClass:NSDictionary.class]) continue;
+            if([@[@"15m",@"1h",@"4h",@"1d"] containsObject:record[@"interval"]]) chart.interval=record[@"interval"];
+            if([record[@"expanded"] isKindOfClass:NSNumber.class]) chart.expanded=[record[@"expanded"] boolValue];
+        }
+    }
     self.quotes=[NSMutableDictionary new]; self.session=[self newSession]; self.started=Now(); self.lastRecovery=self.started; self.delay=2;
     self.panel=[[NSPanel alloc] initWithContentRect:NSMakeRect(0,0,310,[self baseHeight]) styleMask:NSWindowStyleMaskBorderless|NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
     self.panel.delegate=self;
@@ -406,8 +415,10 @@ static NSString *CandleTurnover(NSArray *row) {
     if(!isfinite(scale) || scale<=0) scale=1;
     double height=[self baseHeight];
     double maxScale=MIN(2.0,MIN(screen.size.width/310,screen.size.height/height));
-    scale=MIN(maxScale,MAX(.8,scale));
-    double minScale=MIN(.8,maxScale);
+    // Arrangement may legitimately shrink below the normal manual zoom minimum.
+    // Layout and restoration must not silently enlarge those windows.
+    scale=MIN(maxScale,scale);
+    double minScale=MIN(.8,MIN(scale,maxScale));
     self.panel.contentMinSize=NSMakeSize(310*minScale,height*minScale);
     self.panel.contentMaxSize=NSMakeSize(310*maxScale,height*maxScale);
     self.panel.contentAspectRatio=NSMakeSize(310,height);
@@ -440,7 +451,7 @@ static NSString *CandleTurnover(NSArray *row) {
 }
 -(void)windowDidResize:(NSNotification *)n { if(!self.windowID) [NSUserDefaults.standardUserDefaults setDouble:self.panel.frame.size.width/310 forKey:@"MiniScale"]; [self saveSingleWindows]; }
 -(void)windowDidMove:(NSNotification *)n { if(self.dragEndTimer) self.lastDragMovement=Now(); [self saveSingleWindows]; }
--(void)zoom:(NSButton *)sender { [self layoutPanel:self.panel.frame.size.width/310+sender.tag*.1]; }
+-(void)zoom:(NSButton *)sender { double current=self.panel.frame.size.width/310; [self layoutPanel:MAX(MIN(.8,current),current+sender.tag*.1)]; }
 -(double)baseHeight {
     double height=80+75*self.charts.count;
     for(ChartState *chart in self.charts) if(chart.expanded) height+=260;
@@ -627,18 +638,22 @@ static NSString *CandleTurnover(NSArray *row) {
         [self connect];
     } else if(!self.socket && now>=self.retryAt) [self connect];
 }
--(BOOL)accept:(NSDictionary *)item live:(BOOL)live {
-    if(![item isKindOfClass:NSDictionary.class]) return NO;
+-(Quote *)parsedQuote:(NSDictionary *)item live:(BOOL)live {
+    if(![item isKindOfClass:NSDictionary.class]) return nil;
     NSString *s=item[live?@"s":@"symbol"], *p=item[live?@"c":@"lastPrice"], *c=item[live?@"P":@"priceChangePercent"];
     NSNumber *stamp=item[live?@"E":@"closeTime"];
-    if(![self.symbols containsObject:s] || ![p isKindOfClass:NSString.class] || ![c isKindOfClass:NSString.class] || ![stamp isKindOfClass:NSNumber.class]) return NO;
+    if(![self.symbols containsObject:s] || ![p isKindOfClass:NSString.class] || ![c isKindOfClass:NSString.class] || ![stamp isKindOfClass:NSNumber.class]) return nil;
     double price,change; NSScanner *ps=[NSScanner scannerWithString:p], *cs=[NSScanner scannerWithString:c];
-    if(![ps scanDouble:&price] || !ps.atEnd || ![cs scanDouble:&change] || !cs.atEnd || !isfinite(price) || price<=0 || !isfinite(change)) return NO;
+    if(![ps scanDouble:&price] || !ps.atEnd || ![cs scanDouble:&change] || !cs.atEnd || !isfinite(price) || price<=0 || !isfinite(change)) return nil;
     double time=stamp.doubleValue/1000;
-    if(!isfinite(time) || time<=0 || time>Now()+60) return NO;
-    Quote *old=self.quotes[s]; if(old && old.timestamp>time) return NO;
-    Quote *q=[Quote new]; q.price=price; q.change=change; q.timestamp=time; q.live=live; self.quotes[s]=q;
-    [self.view setNeedsDisplay:YES]; return YES;
+    if(!isfinite(time) || time<=0 || time>Now()+60) return nil;
+    Quote *q=[Quote new]; q.price=price; q.change=change; q.timestamp=time; q.live=live; return q;
+}
+-(BOOL)accept:(NSDictionary *)item live:(BOOL)live {
+    Quote *q=[self parsedQuote:item live:live]; if(!q) return NO;
+    NSString *symbol=item[live?@"s":@"symbol"]; Quote *old=self.quotes[symbol];
+    if(old && old.timestamp>q.timestamp) return NO;
+    self.quotes[symbol]=q; [self.view setNeedsDisplay:YES]; return YES;
 }
 -(void)connect {
     if(self.closed) return;
@@ -689,9 +704,14 @@ static NSString *CandleTurnover(NSArray *row) {
             self.pollTask=nil; self.polling=NO;
             if(error || ((NSHTTPURLResponse *)response).statusCode!=200 || !data) { [self requestFailed:error response:response endpoint:endpoint]; return; }
             id items=[NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            BOOL accepted=NO;
-            if([items isKindOfClass:NSArray.class]) for(id item in items) accepted=[self accept:item live:NO] || accepted;
-            if(accepted && [self quotesFresh]) self.networkError=nil;
+            BOOL valid=[items isKindOfClass:NSArray.class]; NSMutableSet *received=[NSMutableSet new];
+            if(valid) for(id item in items) {
+                if(![self parsedQuote:item live:NO]) { valid=NO; continue; }
+                [received addObject:item[@"symbol"]]; [self accept:item live:NO];
+            }
+            // A slightly older REST snapshot is normal when streaming won the race.
+            // Validate the complete payload, but judge freshness using the newer retained quotes.
+            if(valid && received.count==self.symbols.count && [self quotesFresh]) self.networkError=nil;
             else [self requestFailed:nil response:response endpoint:endpoint];
         });
     }]; [self.pollTask resume];

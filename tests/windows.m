@@ -170,6 +170,14 @@ int main(void) { @autoreleasepool {
     Require(Until(^BOOL { return released.allObjects.count==0; },15),@"rapidly opened and closed windows release controllers after request cancellation");
     Require(restored.singleWindows.count==2,@"rapid open/close leaves the existing windows intact");
     NSLog(@"PASS: 12 rapid open/close cycles released all controllers");
+    Controller *periodProbe=restored.singleWindows.firstObject;
+    for(NSInteger period=0;period<4;period++) {
+        NSButton *button=[NSButton new]; button.tag=period;
+        [periodProbe selectInterval:button];
+        Require(Until(^BOOL { return periodProbe.charts.firstObject.candles.count==60 && CandlesCurrent(periodProbe.charts.firstObject.candles,periodProbe.charts.firstObject.interval,Now()); },20),@"every supported timeframe loads current real candles");
+        Require(![CandleTurnover(periodProbe.charts.firstObject.candles.lastObject) isEqual:@"—"],@"real turnover available on every supported timeframe");
+    }
+    NSLog(@"PASS: real 15m / 1h / 4h / 1d candles and turnover");
     Dispose(restored);
     [NSUserDefaults.standardUserDefaults removePersistentDomainForName:domain];
     puts("PASS: live main + 3 single windows, picker validation/cancel, independent sizing/closing, continued Kline refresh and relaunch restoration");

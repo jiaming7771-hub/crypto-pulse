@@ -160,6 +160,9 @@ static NSRect PlaceWindow(NSSize size, NSRect screen, NSArray<NSValue *> *occupi
     }
     [NSUserDefaults.standardUserDefaults setObject:records forKey:@"SingleCoinWindows"];
     [NSUserDefaults.standardUserDefaults setObject:[root appearanceRecord] forKey:@"MainWindowAppearance"];
+    NSMutableDictionary *mainCharts=[NSMutableDictionary new];
+    for(ChartState *chart in root.charts) mainCharts[chart.symbol]=@{@"interval":chart.interval,@"expanded":@(chart.expanded)};
+    [NSUserDefaults.standardUserDefaults setObject:mainCharts forKey:@"MainChartSettings"];
 }
 -(void)restoreSingleWindows {
     id records=[NSUserDefaults.standardUserDefaults objectForKey:@"SingleCoinWindows"];

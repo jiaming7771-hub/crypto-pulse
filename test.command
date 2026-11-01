@@ -38,3 +38,19 @@ PLIST
     clang -fobjc-arc -fmodules -fmodules-cache-path=/tmp/cryptopulse-clang-cache -mmacosx-version-min=13.0 tests/windows.m -o "$TEST_APP/Contents/MacOS/WindowTests" -framework Cocoa
     "$TEST_APP/Contents/MacOS/WindowTests"
 fi
+
+if [[ "${1:-}" == "--deep" ]]; then
+    TEST_APP=".build/DeepTests.app"
+    mkdir -p "$TEST_APP/Contents/MacOS"
+    cat > "$TEST_APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>DeepTests</string>
+<key>CFBundleIdentifier</key><string>local.bai.cryptopulsemini.deep-tests</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleName</key><string>Crypto Pulse Deep Tests</string>
+</dict></plist>
+PLIST
+    clang -fobjc-arc -fmodules -fmodules-cache-path=/tmp/cryptopulse-clang-cache -mmacosx-version-min=13.0 tests/deep.m -o "$TEST_APP/Contents/MacOS/DeepTests" -framework Cocoa
+    "$TEST_APP/Contents/MacOS/DeepTests"
+fi
